@@ -79,3 +79,30 @@ def save_users(users):
 USERS = load_users()
 
 # -------------------- Utilidades --------------------
+
+def check_failed_attempts(client_ip):
+    current_time = time.time()
+    if client_ip in failed_attempts:
+        info = failed_attempts[client_ip]
+        if info['block_time'] > current_time:
+            return True
+        elif info['block_time'] <= current_time:
+            failed_attempts[client_ip] = {'attempts': 0, 'block_time': 0}
+    return False
+
+def increment_failed_attempts(client_ip):
+    current_time = time.time()
+    if client_ip in failed_attempts:
+        failed_attempts[client_ip]['attempts'] += 1
+    else:
+        failed_attempts[client_ip] = {'attempts': 1, 'block_time': 0}
+    if failed_attempts[client_ip]['attempts'] >= MAX_FAILED_ATTEMPTS:
+        failed_attempts[client_ip]['block_time'] = current_time + BLOCK_TIME
+        return True
+    return False
+
+def generate_unique_filename(directory, original_filename):
+    name, ext = os.path.splitext(original_filename)
+    while True:
+        unique_suffix = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        unique_name = f"{name}_{unique_suffix}{ext}"
