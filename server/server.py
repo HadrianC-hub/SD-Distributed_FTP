@@ -106,3 +106,30 @@ def generate_unique_filename(directory, original_filename):
     while True:
         unique_suffix = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
         unique_name = f"{name}_{unique_suffix}{ext}"
+        if not os.path.exists(os.path.join(directory, unique_name)):
+            return unique_name
+
+def safe_path(session, path):
+    """
+    Devuelve la ruta normalizada dentro del root del session.
+    Lanza PermissionError si la ruta sale del root.
+    """
+    if os.path.isabs(path):
+        candidate = os.path.normpath(path)
+    else:
+        candidate = os.path.normpath(os.path.join(session.current_dir, path))
+    # Obtener rutas absolutas
+    candidate_abs = os.path.abspath(candidate)
+    root_abs = os.path.abspath(session.root_dir)
+    if not candidate_abs.startswith(root_abs):
+        raise PermissionError("Access outside of user root")
+    return candidate_abs
+            
+def get_advertised_ip_for_session(comm_socket):
+    # 1) env var (si existe y no es loopback)
+    env_ip = os.environ.get('FTP_PASV_ADDRESS', '').strip()
+    if env_ip:
+        try:
+            resolved = socket.gethostbyname(env_ip)
+            if not resolved.startswith('127.'):
+                return resolved
