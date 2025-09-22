@@ -187,3 +187,30 @@ def cmd_USER(arg, session):
         session.username = None
         return None
 
+def cmd_PASS(arg, session):
+    if session.username is None:
+        session.client_socket.send(b"503 Bad sequence of commands.\r\n")
+        return False
+    if session.authenticated:
+        session.client_socket.send(b"202 Already logged in.\r\n")
+        return True
+
+    user_info = USERS.get(session.username)
+    if user_info and verify_password(user_info["password"], arg):
+        user_root = os.path.join(SERVER_ROOT, 'root', session.username)
+        os.makedirs(user_root, exist_ok=True)
+        session.root_dir = session.current_dir = user_root
+        session.authenticated = True
+        session.client_socket.send(b"230 Login successful.\r\n")
+        return True
+    else:
+        session.client_socket.send(b"530 Login incorrect.\r\n")
+        increment_failed_attempts(session.client_ip)
+        return False
+
+def cmd_ACCT(arg, session):
+    if session.authenticated:
+        session.client_socket.send(b"202 No additional account information required.\r\n")
+    elif session.username is None:
+        session.client_socket.send(b"503 Bad sequence of commands.\r\n")
+    elif not arg:
