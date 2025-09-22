@@ -214,3 +214,30 @@ def cmd_ACCT(arg, session):
     elif session.username is None:
         session.client_socket.send(b"503 Bad sequence of commands.\r\n")
     elif not arg:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+    else:
+        session.client_socket.send(b"230 Account accepted.\r\n")
+
+def cmd_SMNT(arg, session):
+    if not session.authenticated:
+        session.client_socket.send(b"530 Not logged in.\r\n")
+        return
+    if not arg or not os.path.isdir(arg):
+        session.client_socket.send(b"501 Syntax error or path not found.\r\n")
+        return
+    try:
+        os.chdir(arg)
+        session.client_socket.send(b"250 Directory structure mounted successfully.\r\n")
+    except Exception:
+        session.client_socket.send(b"550 Failed to mount directory structure.\r\n")
+
+def cmd_REIN(session):
+    session.username = None
+    session.authenticated = False
+    session.current_dir = os.path.abspath(SERVER_ROOT)
+    session.client_socket.send(b"220 Service ready for new user.\r\n")
+
+def cmd_PWD(session):
+    if not session.authenticated:
+        session.client_socket.send(b"530 Not logged in.\r\n")
+    else:
