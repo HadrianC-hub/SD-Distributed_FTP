@@ -133,3 +133,30 @@ def get_advertised_ip_for_session(comm_socket):
             resolved = socket.gethostbyname(env_ip)
             if not resolved.startswith('127.'):
                 return resolved
+        except Exception:
+            pass
+
+    # 2) IP local del socket de control (lo más fiable en Docker compose)
+    try:
+        local_ip = comm_socket.getsockname()[0]
+        if local_ip and not local_ip.startswith('127.') and local_ip != '0.0.0.0':
+            return local_ip
+    except Exception:
+        pass
+
+    # 3) "UDP trick": averiguar la IP usada para salir a Internet (no realiza conexión real)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith('127.'):
+            return ip
+    except Exception:
+        pass
+
+    # 4) fallback: host resolution (menos fiable)
+    try:
+        host_ip = socket.gethostbyname(socket.gethostname())
+        if not host_ip.startswith('127.'):
+            return host_ip
