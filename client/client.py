@@ -83,4 +83,26 @@ def cmd_STOR_APPE_STOU(sock, *args, command):
     final_resp = get_response(sock)
     return (True, final_resp) if final_resp.startswith('2') else (False, final_resp)
 
+# Función que ejecuta los comandos USER y PASS para loguearse en el sistema
+def connect_to_ftp(host, port, user, password):
+    try:
+        # Conectar con servidor
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((host, port))
+
+        # Leer mensaje de bienvenida
+        welcome = sock.recv(1024).decode()
+
+        # Enviar usuario
+        sock.sendall(f"USER {user}\r\n".encode())
+        resp_user = sock.recv(1024).decode()
+
+        # Enviar contraseña
+        sock.sendall(f"PASS {password}\r\n".encode())
+        resp_pass = sock.recv(1024).decode()
+
+        return True, sock, f"{welcome}\n{resp_user}\n{resp_pass}"
+    except Exception as e:
+        return False, None, str(e)
+
 
