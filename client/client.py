@@ -189,4 +189,65 @@ def cmd_RETR(sock, remote_path, local_path=None):
         else (False, f"Error en transferencia: {final_resp}")
     )
 
+# Función que recibe la lista de elementos del directorio actual
+def cmd_LIST_NLST(sock, *args, command):
+    """Envía LIST o NLST y devuelve la respuesta del servidor (soporta PASV y PORT)."""
+    global DATA_SOCKET, DATA_SOCKET_IS_LISTENER
+
+    try:
+        data_sock = get_socket(sock)
+    except Exception as e:
+        return f"Error preparando canal de datos: {e}"
+
+    try:
+        # --- Preparar comando y canal ---
+        cmd_line = f"{command} {args[0]}" if args else command
+
+        if DATA_SOCKET_IS_LISTENER:
+            # En modo activo (PORT): enviar comando y aceptar conexión
+            response = send(sock, cmd_line)
+            if not response.startswith(("1", "2")):
+                DATA_SOCKET.close()
+                DATA_SOCKET = None
+                DATA_SOCKET_IS_LISTENER = False
+                return f"Error del servidor: {response}"
+
+            DATA_SOCKET.settimeout(5)
+            conn, _ = DATA_SOCKET.accept()
+            DATA_SOCKET.close()
+            DATA_SOCKET = conn
+            DATA_SOCKET_IS_LISTENER = False
+            data_sock = DATA_SOCKET
+
+        elif data_sock is None:
+            return "Error: no se pudo abrir canal de datos (PASV)."
+
+        else:
+            # PASV: conexión ya establecida
+            sock.sendall(f"{cmd_line}\r\n".encode())
+
+        # --- Transferencia de datos ---
+        prelim = get_response(sock)
+        print(prelim.strip())
+
+        data = bytearray()
+        for chunk in iter(lambda: data_sock.recv(BUFFER_SIZE), b""):
+            data.extend(chunk)
+
+        print(data.decode(errors="ignore"))
+
+        final = get_response(sock)
+        return final.strip()
+
+    except Exception as e:
+        return f"Error durante LIST/NLST: {e}"
+
+    finally:
+        if data_sock:
+            try:
+                data_sock.close()
+            except Exception:
+                pass
+        cleanup_data_socket()
+
 
