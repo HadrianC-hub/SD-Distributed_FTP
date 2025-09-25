@@ -295,3 +295,31 @@ def cmd_MKD(arg, session):
         os.makedirs(path)
         session.client_socket.send(f'257 "{arg}" directory created successfully.\r\n'.encode())
     except PermissionError:
+        session.client_socket.send(b"550 Access denied.\r\n")
+    except Exception:
+        session.client_socket.send(b"550 Failed to create directory.\r\n")
+
+def cmd_RMD(arg, session):
+    if not session.authenticated:
+        session.client_socket.send(b"530 Not logged in.\r\n")
+        return
+    if not arg:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+        return
+    try:
+        target_dir = safe_path(session, arg)
+        if not os.path.exists(target_dir):
+            session.client_socket.send(b"550 Directory not found.\r\n")
+            return
+        if not os.path.isdir(target_dir):
+            session.client_socket.send(b"550 Not a directory.\r\n")
+            return
+        if os.listdir(target_dir):
+            session.client_socket.send(b"550 Directory not empty.\r\n")
+            return
+        os.rmdir(target_dir)
+        session.client_socket.send(b"250 Directory deleted successfully.\r\n")
+    except PermissionError:
+        session.client_socket.send(b"550 Access denied.\r\n")
+    except Exception:
+
