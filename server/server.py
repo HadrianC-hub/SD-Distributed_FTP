@@ -349,3 +349,30 @@ def cmd_TYPE(arg, session):
         return
     a = arg.upper()
     if a == 'A':
+        session.type = 'A'
+        session.client_socket.send(b"200 Type set to ASCII.\r\n")
+    elif a == 'I':
+        session.type = 'I'
+        session.client_socket.send(b"200 Type set to Binary.\r\n")
+    else:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+
+def cmd_MODE(arg, session):
+    if not arg:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+        return
+    a = arg.upper()
+    if a in ('S','B','C'):
+        session.mode = a
+        session.client_socket.send(b"200 Mode set.\r\n")
+    else:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+
+def cmd_SYST(session):
+    system_name = platform.system()
+    if system_name == "Windows":
+        response = "215 Windows Type: L8\r\n"
+    elif system_name == "Linux":
+        response = "215 UNIX Type: L8\r\n"
+    else:
+        response = f"215 {system_name} Type: L8\r\n"
