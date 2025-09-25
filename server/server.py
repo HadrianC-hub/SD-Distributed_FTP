@@ -268,3 +268,30 @@ def cmd_CWD(arg, session):
     except Exception:
         session.client_socket.send(b"550 Failed to change directory.\r\n")
 
+def cmd_CDUP(session):
+    if not session.authenticated:
+        session.client_socket.send(b"530 Not logged in.\r\n")
+        return
+    parent = os.path.abspath(os.path.join(session.current_dir, '..'))
+    root_abs = os.path.abspath(session.root_dir)
+    if not parent.startswith(root_abs):
+        session.client_socket.send(b"550 Access denied.\r\n")
+        return
+    session.current_dir = parent
+    session.client_socket.send(b"250 Directory successfully changed.\r\n")
+
+def cmd_MKD(arg, session):
+    if not session.authenticated:
+        session.client_socket.send(b"530 Not logged in.\r\n")
+        return
+    if not arg:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+        return
+    try:
+        path = safe_path(session, arg)
+        if os.path.exists(path):
+            session.client_socket.send(b"550 Directory already exists.\r\n")
+            return
+        os.makedirs(path)
+        session.client_socket.send(f'257 "{arg}" directory created successfully.\r\n'.encode())
+    except PermissionError:
