@@ -250,4 +250,52 @@ def cmd_LIST_NLST(sock, *args, command):
                 pass
         cleanup_data_socket()
 
+# Función que ejecuta descargas por un puerto específico
+def cmd_PORT(comm_socket, *args):
+    """
+    Crea un listener local y anuncia el puerto al servidor con PORT.
+    Devuelve la respuesta del servidor (string). Si es 2xx, DATA_SOCKET queda como listener
+    y DATA_SOCKET_IS_LISTENER = True.
+    """
+    global DATA_SOCKET, DATA_SOCKET_IS_LISTENER
+
+    args_len = len(args)
+    if args_len < 2:
+        return "501 Syntax error in parameters or arguments."
+
+    bind_host = args[0]
+    try:
+        bind_port = int(args[1]) if args[1] else 0
+    except Exception:
+        return "501 Invalid port number."
+
+    try:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((bind_host, bind_port))
+        listener.listen(1)
+        # lo dejamos non-blocking para evitar accept() bloqueante en main thread
+        listener.setblocking(False)
+    except Exception as e:
+        return f"425 Can't create listener: {e}"
+
+    data_ip, data_port = listener.getsockname()
+    ip_parts = data_ip.split('.')
+    port_high, port_low = divmod(data_port, 256)
+    command = f"PORT {','.join(ip_parts)},{port_high},{port_low}"
+
+    response = send(comm_socket, command)
+    if response.startswith('2'):
+        DATA_SOCKET = listener
+        DATA_SOCKET_IS_LISTENER = True
+        return response
+    else:
+        try:
+            listener.close()
+        except Exception:
+            pass
+        DATA_SOCKET = None
+        DATA_SOCKET_IS_LISTENER = False
+        return response
+
 
