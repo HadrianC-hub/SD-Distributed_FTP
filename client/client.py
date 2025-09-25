@@ -298,4 +298,55 @@ def cmd_PORT(comm_socket, *args):
         DATA_SOCKET_IS_LISTENER = False
         return response
 
+# Función que ejecuta los comandos que no requieren transferencia de datos
+def generic_command_by_type(socket, *args, command, command_type):
+    """Envía el comando especificado al servidor FTP y recibe una respuesta."""
+
+    args_len = len(args)
+    global TYPE, MODE
+
+    if command == 'RNFR':
+        if args_len == 1:
+            return send(socket, f'RNFR {args[0]}')
+        else:
+            resp1 = send(socket, f'RNFR {args[0]}')
+            if not resp1.startswith('3'):
+                return resp1
+            resp2 = send(socket, f'RNTO {args[1]}')
+            return resp1 + "\n" + resp2
+
+    if command == 'QUIT':
+        try:
+            return send(socket, 'QUIT')
+        finally:
+            try:
+                socket.close()
+            except Exception:
+                pass
+
+    if command == 'TYPE':
+        response = send(socket, f"TYPE {args[0]}")
+        if response.startswith('2'):
+            TYPE = args[0].upper()
+        return response
+
+    if command == 'MODE':
+        response = send(socket, f"MODE {args[0]}")
+        if response.startswith('2'):
+            MODE = args[0].upper()
+        return response
+
+    # Genéricos
+    if command_type == 'A':
+        return send(socket, f'{command} {args[0]}')
+    elif command_type == 'B':
+        return send(socket, f'{command}')
+    elif command_type == 'C':
+        if args_len == 1:
+            return send(socket, f'{command} {args[0]}')
+        else:
+            return send(socket, f'{command}')
+
+    return "Error???"
+
 
