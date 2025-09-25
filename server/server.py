@@ -241,3 +241,30 @@ def cmd_PWD(session):
     if not session.authenticated:
         session.client_socket.send(b"530 Not logged in.\r\n")
     else:
+        # Mostrar ruta relativa al root del usuario, como hacen la mayoría de ftp servers
+        rel = os.path.relpath(session.current_dir, session.root_dir)
+        if rel == '.':
+            rel = '/'
+        else:
+            rel = '/' + rel.replace(os.sep, '/')
+        session.client_socket.send(f'257 "{rel}" is the current directory.\r\n'.encode())
+
+def cmd_CWD(arg, session):
+    if not session.authenticated:
+        session.client_socket.send(b"530 Not logged in.\r\n")
+        return
+    if not arg:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+        return
+    try:
+        new_path = safe_path(session, arg)
+        if os.path.isdir(new_path):
+            session.current_dir = new_path
+            session.client_socket.send(b"250 Directory successfully changed.\r\n")
+        else:
+            session.client_socket.send(b"550 Failed to change directory.\r\n")
+    except PermissionError:
+        session.client_socket.send(b"550 Access denied.\r\n")
+    except Exception:
+        session.client_socket.send(b"550 Failed to change directory.\r\n")
+
