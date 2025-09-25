@@ -105,4 +105,88 @@ def connect_to_ftp(host, port, user, password):
     except Exception as e:
         return False, None, str(e)
 
+# Función que ejecuta el comando RETR para descargas
+def cmd_RETR(sock, remote_path, local_path=None):
+    """Recibe un archivo con RETR (soporta modo PASV y PORT)."""
+    global DATA_SOCKET, DATA_SOCKET_IS_LISTENER
+
+    try:
+        # Resolver ruta local
+        if local_path is None:
+            os.makedirs("Downloads", exist_ok=True)
+            local_path = os.path.join("Downloads", os.path.basename(remote_path))
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+
+        w_mode = "w" if TYPE == "A" else "wb"
+        data_sock = get_socket(sock)
+
+        # Preparar conexión de datos
+        if DATA_SOCKET_IS_LISTENER:
+            response = send(sock, f"RETR {remote_path}")
+            if not response.startswith(("1", "2")):
+                DATA_SOCKET.close()
+                DATA_SOCKET = None
+                DATA_SOCKET_IS_LISTENER = False
+                return False, response
+
+            DATA_SOCKET.settimeout(5)
+            conn, _ = DATA_SOCKET.accept()
+            DATA_SOCKET.close()
+            DATA_SOCKET = conn
+            DATA_SOCKET_IS_LISTENER = False
+            data_sock = DATA_SOCKET
+
+        elif data_sock is None:
+            return False, "Error: no se pudo establecer canal de datos (PASV)."
+
+        else:
+            response = send(sock, f"RETR {remote_path}")
+            if not response.startswith(("1", "2")):
+                data_sock.close()
+                DATA_SOCKET = None
+                return False, response
+
+        # --- Recepción del archivo ---
+        with open(local_path, w_mode) as f:
+            if MODE == "S":  # Stream mode
+                for chunk in iter(lambda: data_sock.recv(BUFFER_SIZE), b""):
+                    write_data_chunk(f, chunk, TYPE)
+            else:  # Block mode
+                while True:
+                    header = data_sock.recv(3)
+                    if not header:
+                        break
+                    try:
+                        block_type, block_size = struct.unpack(">BH", header)
+                    except Exception:
+                        break
+                    if block_type == 0x80:
+                        break  # EOF
+                    remaining = block_size
+                    while remaining > 0:
+                        chunk = data_sock.recv(min(BUFFER_SIZE, remaining))
+                        if not chunk:
+                            break
+                        write_data_chunk(f, chunk, TYPE)
+                        remaining -= len(chunk)
+
+    except Exception as e:
+        return False, e
+
+    finally:
+        if data_sock:
+            try:
+                data_sock.close()
+            except Exception:
+                pass
+        cleanup_data_socket()
+
+    # --- Respuesta final ---
+    final_resp = get_response(sock)
+    return (
+        (True, f"Archivo descargado exitosamente: {local_path} - {final_resp}")
+        if final_resp.startswith("2")
+        else (False, f"Error en transferencia: {final_resp}")
+    )
+
 
