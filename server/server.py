@@ -322,4 +322,30 @@ def cmd_RMD(arg, session):
     except PermissionError:
         session.client_socket.send(b"550 Access denied.\r\n")
     except Exception:
+        session.client_socket.send(b"550 Failed to remove directory.\r\n")
 
+def cmd_DELE(arg, session):
+    if not session.authenticated:
+        session.client_socket.send(b"530 Not logged in.\r\n")
+        return
+    if not arg:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+        return
+    try:
+        file_path = safe_path(session, arg)
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            os.remove(file_path)
+            session.client_socket.send(f"250 Deleted {arg}.\r\n".encode())
+        else:
+            session.client_socket.send(f"550 {arg}: No such file.\r\n".encode())
+    except PermissionError:
+        session.client_socket.send(b"550 Access denied.\r\n")
+    except Exception as e:
+        session.client_socket.send(f"550 Failed to delete {arg}: {str(e)}.\r\n".encode())
+
+def cmd_TYPE(arg, session):
+    if not arg:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+        return
+    a = arg.upper()
+    if a == 'A':
