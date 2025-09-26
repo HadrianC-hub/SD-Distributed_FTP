@@ -484,3 +484,30 @@ def cmd_RNFR(arg, session):
     except Exception as e:
         session.client_socket.send(f"550 Error locating file: {str(e)}\r\n".encode())
 
+def cmd_RNTO(arg, session):
+    if not session.rename_from:
+        session.client_socket.send(b"503 Bad sequence of commands.\r\n")
+        return
+    
+    if not arg:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+        return
+    
+    # Validar el nuevo nombre
+    is_valid, error_msg = is_valid_filename(arg)
+    if not is_valid:
+        session.client_socket.send(f"553 Requested action not taken. {error_msg}.\r\n".encode())
+        session.rename_from = None
+        return
+    
+    try:
+        target_path = safe_path(session, arg)
+        
+        # Verificar si el directorio padre existe y tenemos permisos de escritura
+        parent_dir = os.path.dirname(target_path)
+        if not os.path.exists(parent_dir):
+            session.client_socket.send(b"550 Parent directory does not exist.\r\n")
+            session.rename_from = None
+            return
+            
+        if not os.access(parent_dir, os.W_OK):
