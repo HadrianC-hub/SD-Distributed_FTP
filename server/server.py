@@ -403,3 +403,30 @@ def cmd_STAT(arg, session):
         session.client_socket.send(b"550 File or directory not found.\r\n")
 
 def cmd_HELP(arg, session):
+    # Mensajes simplificados
+    help_msg = "214-The following commands are recognized:\r\n" \
+               " USER PASS ACCT CWD CDUP SMNT QUIT REIN PORT PASV TYPE MODE STRU " \
+               "RETR STOR APPE STOU LIST NLST STAT NOOP HELP PWD MKD RMD DELE RNFR RNTO\r\n" \
+               "214 End of help message.\r\n"
+    session.client_socket.send(help_msg.encode())
+
+def is_valid_filename(name):
+    """
+    Valida si un nombre de archivo/carpeta es válido para el sistema operativo.
+    Retorna (es_valido, mensaje_error)
+    """
+
+    # Nombres reservados en Windows
+    reserved_names = {
+        'CON', 'PRN', 'AUX', 'NUL',
+        'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+        'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
+    }
+    # Caracteres prohibidos en la mayoría de sistemas operativos
+    invalid_chars = '<>:"/\\|?*'
+
+    if not name or not name.strip():
+        return False, "Filename cannot be empty"
+    
+    # Verificar caracteres inválidos
+    for char in invalid_chars:
