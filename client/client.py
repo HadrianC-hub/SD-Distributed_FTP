@@ -366,3 +366,14 @@ def cleanup_data_socket():
         DATA_SOCKET = None
         DATA_SOCKET_IS_LISTENER = False
 
+# Ejecuciones secundarias -----------------------------------------------------------------------------------------------------
+
+# Enviar chunk de datos
+def send_data_chunk(data_socket, chunk, transfer_type):
+    """Envía un chunk de datos según el tipo de transferencia"""
+    if transfer_type == 'A':
+        data_socket.sendall(chunk.encode())
+    else:
+        data_socket.sendall(chunk)
+
+
