@@ -376,3 +376,30 @@ def cmd_SYST(session):
         response = "215 UNIX Type: L8\r\n"
     else:
         response = f"215 {system_name} Type: L8\r\n"
+    session.client_socket.send(response.encode())
+
+def cmd_STAT(arg, session):
+    if not arg:
+        system_info = "FTP Server: Type: L8\r\n"
+        session.client_socket.send(f"211- {system_info}".encode())
+        session.client_socket.send(b"211 End of status.\r\n")
+        return
+    try:
+        target_path = safe_path(session, arg)
+        if os.path.isfile(target_path):
+            file_info = os.stat(target_path)
+            last_modified = time.strftime("%Y%m%d%H%M%S", time.gmtime(file_info.st_mtime))
+            file_size = file_info.st_size
+            response = f"213 {last_modified} {file_size} {arg}\r\n"
+            session.client_socket.send(response.encode())
+        elif os.path.isdir(target_path):
+            response = f"213 Directory: {arg} exists.\r\n"
+            session.client_socket.send(response.encode())
+        else:
+            session.client_socket.send(b"550 Not a valid file or directory.\r\n")
+    except PermissionError:
+        session.client_socket.send(b"550 Access denied.\r\n")
+    except Exception:
+        session.client_socket.send(b"550 File or directory not found.\r\n")
+
+def cmd_HELP(arg, session):
