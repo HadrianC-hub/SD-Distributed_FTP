@@ -457,3 +457,30 @@ def is_valid_filename(name):
 
 def cmd_RNFR(arg, session):
     if not arg:
+        session.client_socket.send(b"550 No file name specified.\r\n")
+        return
+    
+    # Validar el nombre del archivo/carpeta origen
+    is_valid, error_msg = is_valid_filename(os.path.basename(arg))
+    if not is_valid:
+        session.client_socket.send(f"553 Requested action not taken. {error_msg}.\r\n".encode())
+        return
+    
+    try:
+        target_path = safe_path(session, arg)
+        if not os.path.exists(target_path):
+            session.client_socket.send(b"550 Requested action not taken. File unavailable.\r\n")
+            return
+        
+        # Verificar permisos de lectura
+        if not os.access(target_path, os.R_OK):
+            session.client_socket.send(b"550 Access denied.\r\n")
+            return
+            
+        session.rename_from = target_path
+        session.client_socket.send(b"350 Ready for RNTO.\r\n")
+    except PermissionError:
+        session.client_socket.send(b"550 Access denied.\r\n")
+    except Exception as e:
+        session.client_socket.send(f"550 Error locating file: {str(e)}\r\n".encode())
+
