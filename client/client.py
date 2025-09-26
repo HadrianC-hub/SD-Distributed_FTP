@@ -376,4 +376,11 @@ def send_data_chunk(data_socket, chunk, transfer_type):
     else:
         data_socket.sendall(chunk)
 
+# Recibir chunk de datos
+def write_data_chunk(file, data, transfer_type):
+    """Escribe un chunk de datos según el tipo de transferencia"""
+    if transfer_type == 'A':
+        file.write(data.decode())
+    else:
+        file.write(data)
 
