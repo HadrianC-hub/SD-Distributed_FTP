@@ -430,3 +430,30 @@ def is_valid_filename(name):
     
     # Verificar caracteres inválidos
     for char in invalid_chars:
+        if char in name:
+            return False, f"Character '{char}' is not allowed"
+    
+    name_upper = name.upper()
+    # Remover extensión para la verificación
+    base_name = name_upper.split('.')[0]
+    
+    if base_name in reserved_names:
+        return False, f"'{name}' is a reserved system name"
+    
+    # Verificar nombres que terminan con punto o espacio
+    if name.endswith('.') or name.endswith(' '):
+        return False, "Filename cannot end with dot or space"
+    
+    # Longitud máxima típica
+    if len(name) > 255:
+        return False, "Filename too long (max 255 characters)"
+    
+    # Verificar caracteres de control (ASCII < 32)
+    for char in name:
+        if ord(char) < 32:
+            return False, "Control characters are not allowed"
+    
+    return True, "Valid"
+
+def cmd_RNFR(arg, session):
+    if not arg:
