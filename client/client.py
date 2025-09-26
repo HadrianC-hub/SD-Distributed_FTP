@@ -349,4 +349,20 @@ def generic_command_by_type(socket, *args, command, command_type):
 
     return "Error???"
 
+# Función que limpia los socket de datos
+def cleanup_data_socket():
+    """
+    Cierra cualquier socket de datos o listener y resetea el estado global.
+    Llamar siempre al desconectar / reiniciar.
+    """
+    global DATA_SOCKET, DATA_SOCKET_IS_LISTENER
+    try:
+        if DATA_SOCKET:
+            try:
+                DATA_SOCKET.close()
+            except Exception:
+                pass
+    finally:
+        DATA_SOCKET = None
+        DATA_SOCKET_IS_LISTENER = False
 
