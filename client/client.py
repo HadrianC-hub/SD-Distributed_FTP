@@ -456,3 +456,10 @@ def get_socket(comm_socket):
 
     # Si DATA_SOCKET es ya una conexión establecida cliente<->servidor, devolverla
     return DATA_SOCKET
+
+# Enviar mensaje al servidor
+def send(socket, message):
+    """Método llamado al enviar un mensaje al servidor FTP."""
+    socket.sendall(f"{message}\r\n".encode())
+    response = get_response(socket)
+    return response
