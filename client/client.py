@@ -394,3 +394,41 @@ def get_response(sock):
             break
         response += chunk
     return response.decode()
+
+# Aceptar conexión abierta por el servidor
+def cmd_PASV(comm_socket):
+    """
+    Entra en PASV, parsea la respuesta y abre un socket conectado al puerto remoto.
+    Devuelve socket conectado o None.
+    """
+    try:
+        response = send(comm_socket, 'PASV')
+        # Si no tenemos respuesta válida
+        if not response or not response.startswith(('2','227','1','3')):
+            return None
+        match = re.search(r'(\d+),(\d+),(\d+),(\d+),(\d+),(\d+)', response)
+        if not match:
+            return None
+        ip_parts = [int(x) for x in match.groups()[:4]]
+        port = int(match.group(5)) * 256 + int(match.group(6))
+        ip = ".".join(str(x) for x in ip_parts)
+        # abrir socket de datos y conectar (timeout corto)
+        dsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        dsock.settimeout(3.0)
+        try:
+            dsock.connect((ip, port))
+        except Exception:
+            try:
+                dsock.close()
+            except Exception:
+                pass
+            return None
+        # buena práctica: quitar timeout y devolver
+        try:
+            dsock.settimeout(None)
+        except Exception:
+            pass
+        return dsock
+    except Exception:
+        return None
+
