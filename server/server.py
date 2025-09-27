@@ -590,3 +590,29 @@ def cmd_PASV(session, data_port_range=(21000, 21100)):
             continue
 
     if listener is None:
+        try:
+            session.client_socket.sendall(b'421 PASV failed.\r\n')
+        except Exception:
+            pass
+        print("[PASV] No se pudo abrir puerto en el rango PASV.")
+        return
+
+    # Calcular IP anunciada (usar socket de control para obtener IP real)
+    server_ip = get_advertised_ip_for_session(session.client_socket)
+    print(f"[PASV] anunciando {server_ip}:{chosen_port} (listener en 0.0.0.0:{chosen_port})")
+
+    ip_parts = server_ip.split('.')
+    p1, p2 = chosen_port // 256, chosen_port % 256
+    try:
+        resp = f"227 Entering Passive Mode ({ip_parts[0]},{ip_parts[1]},{ip_parts[2]},{ip_parts[3]},{p1},{p2}).\r\n"
+        session.client_socket.sendall(resp.encode())
+    except Exception as e:
+        print("[PASV] fallo enviando 227:", e)
+        try:
+            listener.close()
+        except Exception:
+            pass
+        return
+
+    # Guardar listener en la sesión para que accept_passive_connection lo use después
+    session.passive_listener = listener
