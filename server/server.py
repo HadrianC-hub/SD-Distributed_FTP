@@ -538,3 +538,29 @@ def cmd_RNTO(arg, session):
         session.client_socket.send(b"550 Requested action not taken. File unavailable.\r\n")
         session.rename_from = None
     except OSError as e:
+        # Capturar errores específicos del sistema operativo
+        error_code = e.errno if hasattr(e, 'errno') else None
+        
+        if error_code == 18:  # Invalid cross-device link
+            session.client_socket.send(b"553 Requested action not taken. Cannot rename across different devices.\r\n")
+        elif error_code == 30:  # Read-only file system
+            session.client_socket.send(b"553 Requested action not taken. Read-only file system.\r\n")
+        elif error_code == 28:  # No space left on device
+            session.client_socket.send(b"553 Requested action not taken. No space left on device.\r\n")
+        else:
+            session.client_socket.send(f"553 Requested action not taken. System error: {str(e)}\r\n".encode())
+        session.rename_from = None
+    except Exception as e:
+        session.client_socket.send(f"553 Requested action not taken. Unexpected error: {str(e)}\r\n".encode())
+        session.rename_from = None
+
+def cmd_NOOP(session):
+    session.client_socket.send(b"200 NOOP command successful.\r\n")
+
+def cmd_PASV(session, data_port_range=(21000, 21100)):
+    """
+    Abre un listener PASV, lo guarda en session.passive_listener y envía la 227.
+    No hace accept() aquí — accept_passive_connection(session) lo hará luego.
+    """
+    # rango
+    min_p, max_p = data_port_range
