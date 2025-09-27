@@ -384,3 +384,13 @@ def write_data_chunk(file, data, transfer_type):
     else:
         file.write(data)
 
+# Obtener una respuesta del servidor
+def get_response(sock):
+    """Lee exactamente una línea terminada en CRLF."""
+    response = b""
+    while not response.endswith(b"\r\n"):
+        chunk = sock.recv(1)
+        if not chunk:
+            break
+        response += chunk
+    return response.decode()
