@@ -564,3 +564,29 @@ def cmd_PASV(session, data_port_range=(21000, 21100)):
     """
     # rango
     min_p, max_p = data_port_range
+    ports = list(range(min_p, max_p + 1))
+    random.shuffle(ports)
+
+    # cerrar listener antiguo si existe
+    if session.passive_listener:
+        try:
+            session.passive_listener.close()
+        except Exception:
+            pass
+        session.passive_listener = None
+
+    listener = None
+    chosen_port = None
+    for p in ports:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(('', p))     # escuchar en todas las interfaces
+            s.listen(1)
+            listener = s
+            chosen_port = p
+            break
+        except Exception:
+            continue
+
+    if listener is None:
