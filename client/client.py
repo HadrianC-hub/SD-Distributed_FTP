@@ -432,3 +432,27 @@ def cmd_PASV(comm_socket):
     except Exception:
         return None
 
+# Obtener un socket para transmitir datos
+def get_socket(comm_socket):
+    """
+    Devuelve:
+      - socket conectado (PASV) si no hay DATA_SOCKET activo.
+      - si DATA_SOCKET_IS_LISTENER == True devuelve el listener (sin accept).
+    NOTA: No hace accept() bloqueante. Las funciones que llamen a accept deben
+    comprobar si hay datos con select antes de accept para evitar bloquear.
+    """
+    global DATA_SOCKET, DATA_SOCKET_IS_LISTENER
+
+    # Si no hay nada, intentar PASV (rápido)
+    if DATA_SOCKET is None:
+        sock = cmd_PASV(comm_socket)
+        if sock is None:
+            return None
+        return sock
+
+    # Si ya hay un listener (modo PORT), devolverlo (sin hacer accept)
+    if DATA_SOCKET_IS_LISTENER:
+        return DATA_SOCKET
+
+    # Si DATA_SOCKET es ya una conexión establecida cliente<->servidor, devolverla
+    return DATA_SOCKET
