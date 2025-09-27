@@ -511,3 +511,30 @@ def cmd_RNTO(arg, session):
             return
             
         if not os.access(parent_dir, os.W_OK):
+            session.client_socket.send(b"550 Access denied to parent directory.\r\n")
+            session.rename_from = None
+            return
+        
+        if os.path.exists(target_path):
+            session.client_socket.send(b"550 File already exists.\r\n")
+            session.rename_from = None
+            return
+        
+        # Verificar que tenemos permisos de escritura en el archivo/directorio origen
+        if not os.access(os.path.dirname(session.rename_from), os.W_OK):
+            session.client_socket.send(b"550 Access denied to source directory.\r\n")
+            session.rename_from = None
+            return
+            
+        # Intentar el renombrado
+        os.rename(session.rename_from, target_path)
+        session.rename_from = None
+        session.client_socket.send(b"250 Rename successful.\r\n")
+        
+    except PermissionError:
+        session.client_socket.send(b"550 Access denied.\r\n")
+        session.rename_from = None
+    except FileNotFoundError:
+        session.client_socket.send(b"550 Requested action not taken. File unavailable.\r\n")
+        session.rename_from = None
+    except OSError as e:
