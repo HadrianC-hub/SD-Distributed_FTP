@@ -616,3 +616,29 @@ def cmd_PASV(session, data_port_range=(21000, 21100)):
 
     # Guardar listener en la sesión para que accept_passive_connection lo use después
     session.passive_listener = listener
+    # NOTA: no hacemos accept() aquí
+    return
+
+def accept_passive_connection(session, timeout=30):
+    """
+    Si session.passive_listener existe, hace accept() con timeout y
+    devuelve un socket conectado o None.
+    """
+    if not session.passive_listener:
+        return None
+    session.passive_listener.settimeout(timeout)
+    try:
+        conn, addr = session.passive_listener.accept()
+        session.data_socket = conn
+        # cerrar listener (solo una conexión por comando)
+        try:
+            session.passive_listener.close()
+        except Exception:
+            pass
+        session.passive_listener = None
+        return conn
+    except socket.timeout:
+        try:
+            session.passive_listener.close()
+        except Exception:
+            pass
