@@ -642,3 +642,81 @@ def accept_passive_connection(session, timeout=30):
             session.passive_listener.close()
         except Exception:
             pass
+        session.passive_listener = None
+        return None
+    except Exception:
+        try:
+            session.passive_listener.close()
+        except Exception:
+            pass
+        session.passive_listener = None
+        return None
+
+def cmd_PORT(arg, session):
+    # arg: h1,h2,h3,h4,p1,p2
+    if not arg:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+        return
+    parts = arg.strip().split(',')
+    if len(parts) != 6:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+        return
+    try:
+        ip_address = '.'.join(parts[:4])
+        port1, port2 = int(parts[4]), int(parts[5])
+        port = port1 * 256 + port2
+        # crear socket de datos y conectar ahora
+        dsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        dsock.settimeout(10)
+        dsock.connect((ip_address, port))
+        session.data_socket = dsock
+        session.client_socket.send(b"200 PORT command successful.\r\n")
+    except Exception as e:
+        session.client_socket.send(b"425 Can't open data connection.\r\n")
+
+# -------------------- Transferencias --------------------
+
+def close_data_socket(session):
+    try:
+        if session.data_socket:
+            session.data_socket.close()
+    except Exception:
+        pass
+    session.data_socket = None
+
+def cmd_RETR(arg, session):
+    # Preparar data socket (PASV accept or already connected via PORT)
+    if not arg:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+        return
+    if not session.data_socket:
+        # intentar acceptar PASV
+        conn = accept_passive_connection(session)
+        if not conn:
+            session.client_socket.send(b"425 Use PASV or PORT first.\r\n")
+            return
+
+    # localizar archivo
+    try:
+        try:
+            target = safe_path(session, arg)
+        except PermissionError:
+            session.client_socket.send(b"550 Access denied.\r\n")
+            close_data_socket(session)
+            return
+        if not os.path.isfile(target):
+            session.client_socket.send(b"550 File not found.\r\n")
+            close_data_socket(session)
+            return
+
+        if session.type == 'A':
+            session.client_socket.sendall(b"150 Opening ASCII mode data connection for file transfer.\r\n")
+            mode = 'r'
+        else:
+            session.client_socket.sendall(b"150 Opening binary mode data connection for file transfer.\r\n")
+            mode = 'rb'
+
+        if session.mode == 'S':
+            with open(target, mode) as f:
+                while True:
+                    chunk = f.read(BUFFER_SIZE)
