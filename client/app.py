@@ -72,3 +72,7 @@ if "_need_rerun" not in st.session_state:
     st.session_state["_need_rerun"] = False
 if "_last_rerun_time" not in st.session_state:
     st.session_state["_last_rerun_time"] = 0.0
+
+
+# -----------------------------------------------------------------------------------------------------
+# Funciones auxiliares
