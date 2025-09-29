@@ -454,3 +454,46 @@ def cancel_rename():
     st.session_state.new_name = ""
     request_rerun()
 
+# --- CREACIÓN DE DIRECTORIO ---
+
+def start_folder_creation():
+    """Inicia el proceso de creación de carpeta."""
+    st.session_state.creating_folder = True
+    st.session_state.new_folder_name = ""
+
+def confirm_create_folder():
+    """Confirma y crea la nueva carpeta."""
+    folder_name = st.session_state.new_folder_name.strip()
+    
+    if not folder_name:
+        st.error("❌ El nombre de la carpeta no puede estar vacío")
+        return
+    
+    success, message = create_folder(st.session_state.ftp_client, folder_name)
+    
+    if success:
+        st.success(message)
+        log_message(f"📁 Carpeta creada: {folder_name} - {message}")
+    else:
+        log_message(f"❌ Error creando carpeta: {folder_name} - {message}")
+        st.error(message)
+    
+    # Limpiar el estado de creación
+    st.session_state.creating_folder = False
+    st.session_state.new_folder_name = ""
+    request_rerun()
+
+def create_folder(ftp_client, folder_name):
+    """Crea un directorio usando el comando MKD."""
+    try:
+        response = client.generic_command_by_type(ftp_client, folder_name, command="MKD", command_type='A')
+        return True, response
+    except Exception as e:
+        return False, f"Error al crear directorio: {e}"
+
+def cancel_create_folder():
+    """Cancela la creación de carpeta."""
+    st.session_state.creating_folder = False
+    st.session_state.new_folder_name = ""
+    request_rerun()
+
