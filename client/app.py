@@ -97,3 +97,71 @@ def request_rerun(cooldown: float = 0.5):
     st.session_state["_need_rerun"] = True
     st.session_state["_requested_rerun_cooldown"] = cooldown
 
+# --- FUNCIONES PARA APPEND ---
+
+def start_append(item_name, item_type):
+    """Inicia el proceso de append."""
+    st.session_state.append_candidate = (item_name, item_type)
+    st.session_state.append_local_path = ""
+
+def confirm_and_append():
+    """Confirma y ejecuta el append."""
+
+    # Verificando que exista candidato a APPEND
+    if not st.session_state.append_candidate:
+        return
+    
+    # Cargando candidato a APPEND y origen
+    remote_name, _ = st.session_state.append_candidate
+    local_path = st.session_state.append_local_path.strip()
+    
+    # Tirando errores a la interfaz en caso de que el origen no sea válido
+    if not local_path:
+        st.error("❌ La ruta local no puede estar vacía")
+        return
+    if not os.path.exists(local_path):
+        st.error("❌ La ruta especificada no existe")
+        return
+    if os.path.isdir(local_path):
+        st.error("❌ No se puede hacer append de un directorio")
+        return
+    
+    # Haciendo APPEND
+    success, message = append_to_server(st.session_state.ftp_client, local_path, remote_name)
+    
+    # Mostrando mensajes
+    if success:
+        st.success(message)
+        log_message(f"📝 Append exitoso: {local_path} -> {remote_name}")
+    else:
+        log_message(f"💥 Error en append: {local_path} -> {remote_name}")
+        st.error(message)
+    
+    # Limpiando el estado de append
+    st.session_state.append_candidate = None
+    st.session_state.append_local_path = ""
+    st.session_state.appending = False
+
+    # Solicitud de recarga
+    request_rerun()
+
+def cancel_append():
+    """Cancela el proceso de append."""
+    st.session_state.append_candidate = None
+    st.session_state.append_local_path = ""
+    st.session_state.appending = False
+    request_rerun()
+
+def append_to_server(ftp_client, local_path, remote_filename):
+    """Agrega el contenido de un archivo local al final de un archivo remoto usando APPE."""
+    try:
+        # Forzando binario para evitar conflictos de tipo
+        force_binary_type(ftp_client)
+        
+        # Usar cmd_STOR_APPE_STOU con el comando APPE
+        success, message = client.cmd_STOR_APPE_STOU(ftp_client, local_path, remote_filename, command="APPE")
+        return success, message
+        
+    except Exception as e:
+        return False, e
+
