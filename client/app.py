@@ -165,3 +165,106 @@ def append_to_server(ftp_client, local_path, remote_filename):
     except Exception as e:
         return False, e
 
+# --- FUNCIONES PARA STOU ---
+
+def start_stou_upload():
+    """Inicia el proceso de subida con STOU."""
+    st.session_state.stou_upload_candidate = True
+    st.session_state.stou_upload_path = ""
+    st.session_state.stou_multiple_files = []
+
+def confirm_and_stou_upload():
+    """Confirma y ejecuta la subida con STOU."""
+    if not st.session_state.stou_multiple_files:
+        st.error("❌ No se han seleccionado archivos")
+        return
+    
+    uploaded_count = 0
+    error_count = 0
+    error_messages = []
+    
+    st.session_state.stou_uploading = True
+    
+    for file_path in st.session_state.stou_multiple_files:
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            success, message = stou_upload_to_server(st.session_state.ftp_client, file_path)
+            if success:
+                uploaded_count += 1
+                log_message(f"✅ Subida STOU exitosa: {file_path}")
+            else:
+                error_count += 1
+                error_messages.append(f"{os.path.basename(file_path)}: {message}")
+                log_message(f"❌ Error en subida STOU: {file_path} - {message}")
+        else:
+            error_count += 1
+            error_messages.append(f"{file_path}: No es un archivo válido")
+    
+    # Mostrar resumen
+    if uploaded_count > 0:
+        st.success(f"✅ {uploaded_count} archivo(s) subido(s) exitosamente con STOU")
+    
+    if error_count > 0:
+        st.error(f"❌ {error_count} archivo(s) con errores")
+        for error_msg in error_messages:
+            st.error(f"   - {error_msg}")
+    
+    # Limpiar el estado de subida
+    st.session_state.stou_upload_candidate = None
+    st.session_state.stou_upload_path = ""
+    st.session_state.stou_multiple_files = []
+    st.session_state.stou_uploading = False
+    request_rerun()
+
+def cancel_stou_upload():
+    """Cancela el proceso de subida STOU."""
+    st.session_state.stou_upload_candidate = None
+    st.session_state.stou_upload_path = ""
+    st.session_state.stou_multiple_files = []
+    st.session_state.stou_uploading = False
+    request_rerun()
+
+def stou_upload_to_server(ftp_client, local_path):
+    """Sube un archivo individual al servidor usando STOU."""
+    try:
+        force_binary_type(ftp_client)
+        
+        # Usar STOU para subida única
+        success, message = client.cmd_STOR_APPE_STOU(ftp_client, local_path, command="STOU")
+        return success, message
+        
+    except Exception as e:
+        return False, f"Error al subir {local_path} con STOU: {e}"
+
+def add_file_to_stou_list():
+    """Agrega un archivo a la lista de subida STOU."""
+    file_path = st.session_state.stou_upload_path.strip()
+    
+    if not file_path:
+        st.error("❌ La ruta no puede estar vacía")
+        return
+    
+    if not os.path.exists(file_path):
+        st.error("❌ La ruta especificada no existe")
+        return
+    
+    if os.path.isdir(file_path):
+        st.error("❌ STOU solo admite archivos individuales, no carpetas")
+        return
+    
+    if file_path in st.session_state.stou_multiple_files:
+        st.warning("⚠️ El archivo ya está en la lista")
+    else:
+        st.session_state.stou_multiple_files.append(file_path)
+        st.success(f"✅ Archivo agregado: {os.path.basename(file_path)}")
+    
+    # Limpiar el campo de entrada
+    st.session_state.stou_upload_path = ""
+    request_rerun()
+
+def remove_file_from_stou_list(index):
+    """Elimina un archivo de la lista de subida STOU."""
+    if 0 <= index < len(st.session_state.stou_multiple_files):
+        removed_file = st.session_state.stou_multiple_files.pop(index)
+        log_message(f"🗑️ Archivo removido de la lista: {removed_file}")
+        request_rerun()
+
