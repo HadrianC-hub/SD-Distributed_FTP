@@ -76,3 +76,24 @@ if "_last_rerun_time" not in st.session_state:
 
 # -----------------------------------------------------------------------------------------------------
 # Funciones auxiliares
+
+# -----------------------------------------------------------------------------------------------------
+
+# --- FUNCIONES PARA RECARGAR PÁGINA SIN ROMPERLA (Comptibilidad con Docker) ---
+
+# Cooldown por acción (evita ejecuciones repetidas en corto tiempo)
+def can_do_action(name: str, cooldown: float = 1.0) -> bool:
+    now = time.time()
+    key = f"_last_action_{name}"
+    last = st.session_state.get(key, 0.0)
+    if now - last < cooldown:
+        # demasiado pronto para repetir
+        return False
+    st.session_state[key] = now
+    return True
+
+# En lugar de llamar request_rerun() directamente, llamar a request_rerun()
+def request_rerun(cooldown: float = 0.5):
+    st.session_state["_need_rerun"] = True
+    st.session_state["_requested_rerun_cooldown"] = cooldown
+
