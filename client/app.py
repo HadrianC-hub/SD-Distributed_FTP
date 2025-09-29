@@ -268,3 +268,129 @@ def remove_file_from_stou_list(index):
         log_message(f"🗑️ Archivo removido de la lista: {removed_file}")
         request_rerun()
 
+# --- FUNCIONES PARA SUBIDA ---
+
+def start_upload():
+    """Inicia el proceso de subida."""
+    st.session_state.upload_candidate = True
+    st.session_state.upload_path = ""
+
+def confirm_and_upload():
+    """Confirma y ejecuta la subida."""
+    upload_path = st.session_state.upload_path.strip()
+    
+    if not upload_path:
+        st.error("❌ La ruta no puede estar vacía")
+        return
+    
+    if not os.path.exists(upload_path):
+        st.error("❌ La ruta especificada no existe")
+        return
+    
+    success, message = upload_to_server(st.session_state.ftp_client, upload_path)
+    
+    if success:
+        st.success(f"✅ {message}")
+        log_message(f"📤 Subida exitosa: {upload_path}")
+    else:
+        st.error(f"❌ {message}")
+        log_message(f"💥 Error en subida: {upload_path} - {message}")
+    
+    # Limpiar el estado de subida
+    st.session_state.upload_candidate = None
+    st.session_state.upload_path = ""
+    st.session_state.uploading = False
+    request_rerun()
+
+def cancel_upload():
+    """Cancela el proceso de subida."""
+    st.session_state.upload_candidate = None
+    st.session_state.upload_path = ""
+    st.session_state.uploading = False
+    request_rerun()
+
+def upload_to_server(ftp_client, local_path):
+    """Sube un archivo o carpeta al servidor FTP."""
+    try:
+        force_binary_type(ftp_client)
+        
+        # Usar la función recursiva para manejar tanto archivos como carpetas
+        success, message = store_recursive(ftp_client, local_path)
+        return success, message
+        
+    except Exception as e:
+        return False, f"Error al subir {local_path}: {e}"
+    
+def store_recursive(ftp_socket, local_path, remote_base_path=""):
+    """Sube recursivamente una carpeta local al servidor FTP."""
+    try:
+        # Normalizar la ruta local
+        local_path = os.path.abspath(local_path)
+        
+        if not os.path.exists(local_path):
+            return False, f"La ruta local no existe: {local_path}"
+        
+        uploaded_files = 0
+        uploaded_dirs = 0
+        errors = []
+        
+        if os.path.isfile(local_path):
+            # Es un archivo individual
+            file_name = os.path.basename(local_path)
+            remote_path = os.path.join(remote_base_path, file_name).replace("\\", "/")
+            
+            success, message = client.cmd_STOR_APPE_STOU(ftp_socket, local_path, remote_path, command="STOR")
+            if success:
+                uploaded_files += 1
+                return True, f"Archivo subido: {file_name}"
+            else:
+                return False, f"Error subiendo archivo {file_name}: {message}"
+                
+        elif os.path.isdir(local_path):
+            # Es una carpeta - subir recursivamente
+            dir_name = os.path.basename(local_path)
+            
+            # Crear el directorio remoto
+            remote_dir_path = os.path.join(remote_base_path, dir_name).replace("\\", "/")
+            try:
+                mkdir_response = client.generic_command_by_type(ftp_socket, remote_dir_path, command="MKD", command_type='A')
+                if not mkdir_response.startswith('2'):
+                    # El directorio podría ya existir, continuar
+                    log_message(f"⚠️ No se pudo crear directorio {remote_dir_path}: {mkdir_response}")
+            except Exception as e:
+                log_message(f"⚠️ Error creando directorio {remote_dir_path}: {e}")
+            
+            # Recorrer el contenido del directorio local
+            for item in os.listdir(local_path):
+                local_item_path = os.path.join(local_path, item)
+                
+                if os.path.isfile(local_item_path):
+                    # Subir archivo
+                    remote_file_path = os.path.join(remote_dir_path, item).replace("\\", "/")
+                    success, message = client.cmd_STOR_APPE_STOU(ftp_socket, local_item_path, remote_file_path, command="STOR")
+                    if success:
+                        uploaded_files += 1
+                        log_message(f"✅ Subido: {item}")
+                    else:
+                        error_msg = f"Error con {item}: {message}"
+                        errors.append(error_msg)
+                        log_message(f"❌ {error_msg}")
+                        
+                elif os.path.isdir(local_item_path):
+                    # Llamada recursiva para subdirectorios
+                    success, message = store_recursive(ftp_socket, local_item_path, remote_dir_path)
+                    if success:
+                        uploaded_dirs += 1
+                        log_message(f"✅ Directorio subido: {item}")
+                    else:
+                        error_msg = f"Error con directorio {item}: {message}"
+                        errors.append(error_msg)
+                        log_message(f"❌ {error_msg}")
+
+            if errors:
+                return False, f"Subida parcial. Archivos: {uploaded_files}, Carpetas: {uploaded_dirs}. Errores: {len(errors)}"
+            else:
+                return True, f"Subida completada. Archivos: {uploaded_files}, Carpetas: {uploaded_dirs}"
+                
+    except Exception as e:
+        return False, f"Error en subida recursiva: {e}"
