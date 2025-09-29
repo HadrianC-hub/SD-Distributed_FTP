@@ -394,3 +394,63 @@ def store_recursive(ftp_socket, local_path, remote_base_path=""):
                 
     except Exception as e:
         return False, f"Error en subida recursiva: {e}"
+
+# --- RENOMBRADO DE ARCHIVOS Y CARPETAS ---
+
+def start_renaming(item_name, item_type):
+    """Inicia el proceso de renombrado."""
+    st.session_state.renaming_candidate = (item_name, item_type)
+    st.session_state.new_name = item_name  # Inicializar con el nombre actual
+
+def confirm_rename():
+    """Confirma y ejecuta el renombrado."""
+    if not st.session_state.renaming_candidate:
+        return
+    
+    old_name, item_type = st.session_state.renaming_candidate
+    new_name = st.session_state.new_name.strip()
+    
+    if not new_name:
+        st.error("❌ El nuevo nombre no puede estar vacío")
+        return
+    if old_name == new_name:
+        st.error("❌ El nuevo nombre debe ser diferente al actual")
+        return
+    
+    # Intentar RNFR
+    success = True
+    error = ""
+    response = client.generic_command_by_type(st.session_state.ftp_client, old_name, command="RNFR", command_type='A')
+    if response:
+        log_message(response)
+
+    if not response.startswith('3'):
+        error = response
+        success = False
+    
+    # Intentar RNTO
+    if success:
+        response = client.generic_command_by_type(st.session_state.ftp_client, new_name, command="RNTO", command_type='A')
+
+        if not response.startswith('2'):
+            success = False
+            error = response
+    
+    if success:
+        st.success(response)
+        log_message(f"✏️ Renombrado {item_type}: {old_name} -> {new_name}")
+    else:
+        log_message(f"❌ Error renombrando {item_type}: {old_name} -> {new_name} - {message}")
+        st.error(error)
+    
+    # Limpiar el estado de renombrado
+    st.session_state.renaming_candidate = None
+    st.session_state.new_name = ""
+    request_rerun()
+
+def cancel_rename():
+    """Cancela el proceso de renombrado."""
+    st.session_state.renaming_candidate = None
+    st.session_state.new_name = ""
+    request_rerun()
+
