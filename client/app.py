@@ -1149,3 +1149,14 @@ def change_dir(ftp_socket, target):
     except Exception as e:
         return False, f"Error: {e}"
 
+# --- FUNCIONES DE CONSOLA ---
+
+def log_message(msg: str):
+    st.session_state.console.append(str(msg))
+
+def toggle_console():
+    st.session_state.show_console = not st.session_state.show_console
+
+def clear_console():
+    st.session_state.console = []
+
