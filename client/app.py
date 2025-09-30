@@ -986,3 +986,166 @@ def setup_port_command(ftp_client, ip, port):
     except Exception as e:
         return False, f"Error configurando PORT: {e}"
 
+# --- GESTIONES DE DIRECTORIOS ---
+
+def get_current_dir(ftp_socket):
+    """Obtiene el directorio actual."""
+    response = client.generic_command_by_type(ftp_socket, command="PWD", command_type='B')
+    if isinstance(response, str) and response.startswith('2'):
+        match = re.search(r'"(.+)"', response)
+        return match.group(1) if match else "/"
+    return "/"
+
+def list_directory(ftp_socket, path=None):
+    """
+    Lista archivos y carpetas en el servidor usando LIST.
+    Devuelve información detallada incluyendo permisos, propietario, tamaño, etc.
+    """
+
+    old_stdout = sys.stdout
+    sys.stdout = mystdout = io.StringIO()
+
+    try:
+        if path:
+            result = client.cmd_LIST_NLST(ftp_socket, path, command="LIST")
+        else:
+            result = client.cmd_LIST_NLST(ftp_socket, command="LIST")
+        
+        if result:
+            log_message(result)
+    except Exception as e:
+        log_message(f"Error: {e}")
+    finally:
+        sys.stdout = old_stdout
+
+    raw_output = mystdout.getvalue()
+    lines = raw_output.splitlines()
+    
+    items = []
+    messages = []
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Filtrar respuestas del servidor (códigos numéricos)
+        if re.match(r'^\d{3}', line):
+            messages.append(line)
+            continue
+
+        # Filtrar líneas de información como "total X"
+        if line.lower().startswith('total '):
+            messages.append(line)
+            continue
+
+        # Parsear formato UNIX estándar (ls -l)
+        # Ejemplo: drwxr-xr-x 2 user group 4096 Dec 31 23:59 directory
+        if len(line) > 10 and line[0] in 'd-l' and any(c in line[1:10] for c in 'rwx-'):
+            # Intentar dividir la línea de manera más robusta
+            parts = line.split(None, 8)  # Dividir en máximo 9 partes
+            if len(parts) >= 9:
+                try:
+                    permissions = parts[0]
+                    links = parts[1]
+                    owner = parts[2]
+                    group = parts[3]
+                    size = parts[4]
+                    month = parts[5]
+                    day = parts[6]
+                    time_or_year = parts[7]
+                    name = parts[8]
+                    
+                    # Validar que sea un elemento válido
+                    if name in ['.', '..']:
+                        continue
+                    
+                    # Determinar tipo
+                    if permissions.startswith('d'):
+                        item_type = "dir"
+                    elif permissions.startswith('l'):
+                        item_type = "link"
+                    else:
+                        item_type = "file"
+                    
+                    # Formatear fecha
+                    date_str = f"{month} {day} {time_or_year}"
+                    
+                    items.append({
+                        "name": name,
+                        "type": item_type,
+                        "permissions": permissions,
+                        "links": links,
+                        "owner": owner,
+                        "group": group,
+                        "size": size,
+                        "date": date_str,
+                        "raw_line": line
+                    })
+                    continue
+                except Exception as e:
+                    messages.append(f"Error parsing line: {line} - {e}")
+                    continue
+
+        # Si llegamos aquí, la línea no coincide con el formato esperado
+        # Intentar extraer al menos el nombre y tipo básico
+        if len(line) > 2 and not line.isspace():
+            # Para líneas que podrían tener nombres con espacios, buscar desde el final
+            # Asumir que los primeros campos son permisos, links, owner, group, size, date
+            # y el resto es el nombre
+            parts = line.split()
+            if len(parts) >= 8:
+                # Intentar determinar el tipo por el primer carácter
+                if line[0] == 'd':
+                    item_type = "dir"
+                elif line[0] == 'l':
+                    item_type = "link"
+                else:
+                    item_type = "file"
+                
+                # El nombre es todo lo que viene después de los primeros 7 campos
+                name_parts = parts[7:]
+                name = ' '.join(name_parts)
+                
+                if name not in ['.', '..'] and not re.match(r'^\d{3}', name):
+                    items.append({
+                        "name": name,
+                        "type": item_type,
+                        "permissions": parts[0] if len(parts) > 0 else "",
+                        "links": parts[1] if len(parts) > 1 else "",
+                        "owner": parts[2] if len(parts) > 2 else "",
+                        "group": parts[3] if len(parts) > 3 else "",
+                        "size": parts[4] if len(parts) > 4 else "",
+                        "date": f"{parts[5]} {parts[6]}" if len(parts) > 6 else "",
+                        "raw_line": line
+                    })
+                    messages.append(f"Advanced parse: {line}")
+
+    return items, messages
+
+def change_dir(ftp_socket, target):
+    """Cambia de directorio."""
+    try:
+        # Manejo especial para el directorio padre ".."
+        if target == "..":
+            response = client.generic_command_by_type(ftp_socket, command="CDUP", command_type="B")
+        else:
+            # Si el objetivo tiene espacios, asegurarse de que se maneje correctamente
+            if ' ' in target:
+                # Intentar primero sin comillas (comportamiento normal)
+                response = client.generic_command_by_type(ftp_socket, target, command="CWD", command_type="A")
+                if not (isinstance(response, str) and response.startswith('2')):
+                    # Si falla, intentar con comillas
+                    quoted_target = f'"{target}"'
+                    response = client.generic_command_by_type(ftp_socket, quoted_target, command="CWD", command_type="A")
+            else:
+                response = client.generic_command_by_type(ftp_socket, target, command="CWD", command_type="A")
+        
+        if isinstance(response, str) and response.startswith('2'):
+            new_dir = get_current_dir(ftp_socket)
+            return True, new_dir
+        else:
+            return False, response
+    except Exception as e:
+        return False, f"Error: {e}"
+
