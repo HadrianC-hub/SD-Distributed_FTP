@@ -1160,3 +1160,125 @@ def toggle_console():
 def clear_console():
     st.session_state.console = []
 
+# --- GESTIÓN DE CONEXIONES Y NAVEGACIÓN ---
+
+def generate_connection_id():
+    """Genera un ID único para la conexión basado en credenciales y timestamp"""
+    connection_string = f"{st.session_state.host}:{st.session_state.port}:{st.session_state.usuario}:{time.time()}"
+    # Usar hash() nativo de Python y convertir a hexadecimal
+    return hex(hash(connection_string))[-8:]
+
+def start_connection():
+    """Callback del botón conectar."""
+    
+    # Generar nuevo ID de conexión
+    st.session_state.connection_id = generate_connection_id()
+    
+    # Guardar las credenciales en el estado de la sesión
+    st.session_state.host = st.session_state.host
+    st.session_state.port = st.session_state.port
+    st.session_state.usuario = st.session_state.usuario
+    st.session_state.password = st.session_state.password
+    
+    success, ftp_client, message = client.connect_to_ftp(st.session_state.host,st.session_state.port,st.session_state.usuario,st.session_state.password)
+
+    log_message(message if message else "Conexión establecida")
+
+    if success and "Login successful" in (message if message else ""):
+        st.session_state.ftp_client = ftp_client
+        st.session_state.current_dir = "/"
+        st.session_state.keep_alive_started = False
+        
+        # Sincronizar client con el estado de la sesión
+        client.MODE = st.session_state.transfer_mode
+        client.TYPE = st.session_state.transfer_type
+        
+        # Forzar rerun inmediato
+        request_rerun()
+
+    else:
+        st.session_state.ftp_client = None
+
+def restart_connection():
+    """Reinicia la conexión FTP usando el comando REIN y luego reconecta automáticamente"""
+    # Guardar las credenciales actuales antes de reiniciar
+    host = st.session_state.host
+    port = st.session_state.port
+    usuario = st.session_state.usuario
+    password = st.session_state.password
+    if st.session_state.ftp_client:
+        try:
+            # Enviar comando REIN para reiniciar la conexión
+            response = client.generic_command_by_type(st.session_state.ftp_client, command="REIN", command_type='B')
+            log_message(response)
+            
+            # Cerrar el socket de manera más agresiva
+            st.session_state.ftp_client.close()
+
+            try:
+                client.cleanup_data_socket()
+            except Exception:
+                pass
+
+
+        except Exception as e:
+            log_message(f"Error en REIN: {e}")
+        finally:
+            st.session_state.ftp_client = None
+    
+    # Pequeña pausa para asegurar que el socket se cerró
+    time.sleep(2)
+    
+    # Generar nuevo ID de conexión
+    new_connection_id = generate_connection_id()
+    st.session_state.connection_id = new_connection_id
+    
+    log_message("🔄 Intentando reconexión automática...")
+
+    success, ftp_client, message = client.connect_to_ftp(host, port, usuario, password)
+
+    if message:
+        log_message(message)
+    
+    if success and "Login successful" in (message if message else ""):
+        st.session_state.ftp_client = ftp_client
+        st.session_state.keep_alive_started = False
+
+        # Sincronizar configuraciones después de reconectar
+        client.MODE = st.session_state.transfer_mode
+        client.TYPE = st.session_state.transfer_type
+
+        log_message("✅ Reconexión exitosa")
+    else:
+        log_message("❌ Reconexión fallida - Volviendo a pantalla de login")
+        st.session_state.ftp_client = None
+        try:
+            client.cleanup_data_socket()
+        except Exception:
+            pass
+
+    request_rerun()
+
+def handle_directory_navigation(target):
+    """Maneja la navegación a directorios."""
+    if st.session_state.navigation_lock:
+        st.warning("🔄 Navegación en progreso...")
+        return
+    
+    st.session_state.navigation_lock = True
+    
+    try:
+        ftp = st.session_state.ftp_client
+        success, new_dir_or_msg = change_dir(ftp, target)
+        
+        if success:
+            st.session_state.current_dir = new_dir_or_msg
+            st.success(f"✅ Directorio cambiado a: {new_dir_or_msg}")
+        else:
+            st.error(f"❌ No se pudo abrir '{target}': {new_dir_or_msg}")
+    except Exception as e:
+        st.error(f"❌ Error al cambiar directorio: {e}")
+    finally:
+        st.session_state.navigation_lock = False
+        request_rerun()
+
