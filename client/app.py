@@ -877,3 +877,112 @@ def download_directory_recursive(ftp_client, remote_dir, local_base_path):
             pass
         return False, f"Error en descarga recursiva: {e}"
 
+# --- FUNCIONES PARA DESCARGA CON PORT ---
+
+def start_download_with_port(item_name, item_type):
+    """Inicia el proceso de descarga usando el comando PORT."""
+    st.session_state.download_port_candidate = (item_name, item_type)
+    st.session_state.using_port_mode = True
+    # Inicializar valores por defecto para PORT
+    if "port_ip" not in st.session_state:
+        st.session_state.port_ip = "127.0.0.1"
+    if "port_port" not in st.session_state:
+        st.session_state.port_port = "22"
+
+def confirm_and_download_with_port():
+    """Maneja la confirmación y descarga usando el comando PORT."""
+    if not st.session_state.download_port_candidate:
+        return
+
+    item_name, item_type = st.session_state.download_port_candidate
+
+    # Solo permitir archivos individuales para PORT (no carpetas)
+    if item_type != "file":
+        st.error("❌ El modo PORT solo está disponible para archivos individuales")
+        st.session_state.download_port_candidate = None
+        st.session_state.using_port_mode = False
+        request_rerun()
+        return
+
+    ensure_download_dir()
+    
+    # Obtener IP y Puerto del usuario
+    ip = st.session_state.port_ip
+    port = st.session_state.port_port
+    
+    if not ip or not port:
+        st.error("❌ Debe especificar IP y Puerto para usar el modo PORT")
+        return
+    
+    # Configurar PORT y luego descargar
+    local_path = os.path.join(st.session_state.download_path, item_name)
+    success, message = download_file_with_port(st.session_state.ftp_client, item_name, local_path, ip, port)
+    
+    if success:
+        st.success(message)
+        log_message(f"🎉 Descarga con PORT exitosa: {item_name}")
+    else:
+        st.error(message)
+        log_message(f"💥 Error en descarga con PORT: {item_name} - {message}")
+    
+    # Limpiar el estado
+    st.session_state.download_port_candidate = None
+    st.session_state.using_port_mode = False
+    request_rerun()
+
+def download_file_with_port(ftp_client, remote_filename, local_path, ip, port):
+    """Descarga un archivo individual usando el comando PORT."""
+    try: 
+        # Asegurar que el directorio local existe
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        local_path = os.path.abspath(local_path)
+        
+        log_message(f"📄 Iniciando descarga con PORT: {remote_filename} -> {local_path}")
+        log_message(f"🔌 Configurando PORT con IP: {ip}, Puerto: {port}")
+        
+        force_binary_type(ftp_client)
+        
+        # Configurar el comando PORT
+        port_success, port_message = setup_port_command(ftp_client, ip, port)
+        if not port_success:
+            return False, f"Error configurando PORT: {port_message}"
+        
+        # Descargar archivo usando RETR (que ahora usará el socket configurado por PORT)
+        result = client.cmd_RETR(ftp_client, remote_filename, local_path)
+        
+        # Verificar si cmd_RETR retornó una tupla (success, message)
+        if isinstance(result, tuple) and len(result) == 2:
+            success, message = result
+        else:
+            success = False
+            message = f"Respuesta inesperada de cmd_RETR: {result}"
+        
+        if success:
+            log_message(f"✅ Archivo descargado exitosamente con PORT: {local_path}")
+            return True, f"Archivo descargado con PORT: {os.path.basename(local_path)}"
+        else:
+            log_message(f"❌ Error en descarga con PORT: {message}")
+            return False, message
+            
+    except Exception as e:
+        error_msg = f"Error al descargar archivo {remote_filename} con PORT: {e}"
+        log_message(f"💥 {error_msg}")
+        return False, error_msg
+
+def setup_port_command(ftp_client, ip, port):
+    """Configura el comando PORT para transferencia activa."""
+    try:
+        # Enviar comando PORT con la IP y puerto proporcionados
+        response = client.cmd_PORT(ftp_client, ip, port)
+        
+        if response and response.startswith('2'):
+            log_message(f"✅ Comando PORT exitoso - IP: {ip}, Puerto: {port}")
+            log_message(response)
+            return True, "PORT configurado correctamente"
+        else:
+            log_message(response)
+            return False, f"Error en comando PORT: {response}"
+            
+    except Exception as e:
+        return False, f"Error configurando PORT: {e}"
+
