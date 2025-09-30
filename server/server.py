@@ -720,3 +720,29 @@ def cmd_RETR(arg, session):
             with open(target, mode) as f:
                 while True:
                     chunk = f.read(BUFFER_SIZE)
+                    if not chunk:
+                        break
+                    if session.type == 'A':
+                        session.data_socket.sendall(chunk.encode())
+                    else:
+                        session.data_socket.sendall(chunk)
+        else:
+            with open(target, mode) as f:
+                while True:
+                    data = f.read(BUFFER_SIZE)
+                    if not data:
+                        break  # Fin del archivo
+                    # Crear encabezado del bloque (DATA)
+                    block_header = struct.pack(">BH", 0x00, len(data))  # (Tipo, Tamaño)
+                    if session.type == 'A':
+                        session.data_socket.sendall(block_header + data.encode())  # Enviar bloque
+                    else:
+                        session.data_socket.sendall(block_header + data)  # Enviar bloque
+                # Enviar bloque EOF al final
+                eof_header = struct.pack(">BH", 0x80, 0)  # Tipo EOF, Tamaño 0
+                session.data_socket.sendall(eof_header)
+
+        close_data_socket(session)
+        session.client_socket.sendall(b"226 Transfer complete.\r\n")
+    except Exception as e:
+        close_data_socket(session)
