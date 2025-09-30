@@ -497,3 +497,131 @@ def cancel_create_folder():
     st.session_state.new_folder_name = ""
     request_rerun()
 
+# --- BORRADO DE ARCHIVOS Y CARPETAS ---
+
+def confirm_and_delete(item_name, item_type):
+    """Maneja la confirmación y eliminación de archivos/directorios."""
+    if item_type == "file":
+        success, message = delete_file(st.session_state.ftp_client, item_name)
+    else:
+        # Para directorios, usar eliminación recursiva
+        success, message = delete_directory_recursive(st.session_state.ftp_client, item_name)
+    
+    if success:
+        st.success(message)
+        log_message(f"🗑️ Eliminado {item_type}: {item_name} - {message}")
+    else:
+        st.error(message)
+        log_message(f"❌ Error eliminando {item_type}: {item_name} - {message}")
+    
+    # Limpiar el estado de confirmación
+    st.session_state.delete_candidate = None
+    request_rerun()
+
+def delete_file(ftp_client, filename):
+    """Elimina un archivo usando el comando DELE."""
+    try:
+        response = client.generic_command_by_type(ftp_client, filename, command="DELE", command_type='A')
+        return True, response
+    except Exception as e:
+        return False, f"Error al eliminar archivo: {e}"
+
+def delete_directory(ftp_client, dirname):
+    """Elimina un directorio usando el comando RMD."""
+    try:
+        response = client.generic_command_by_type(ftp_client, dirname, command="RMD", command_type='A')
+        return True, response
+    except Exception as e:
+        return False, f"Error al eliminar directorio: {e}"
+
+def delete_directory_recursive(ftp_socket, dir_name):
+    """Elimina recursivamente una carpeta y todo su contenido."""
+    try:
+        # Guardar directorio actual ANTES de cualquier cambio
+        original_dir = get_current_dir(ftp_socket)
+        log_message(f"🔍 Iniciando eliminación recursiva de: {dir_name} desde {original_dir}")
+        
+        # Cambiar al directorio a eliminar
+        success, message = change_dir(ftp_socket, dir_name)
+        if not success:
+            return False, f"No se pudo acceder al directorio: {dir_name} - {message}"
+        
+        current_remote_dir = get_current_dir(ftp_socket)
+        log_message(f"📁 Cambiado a directorio: {current_remote_dir}")
+        
+        # Obtener listado del directorio
+        items, messages = list_directory(ftp_socket)
+        for msg in messages:
+            log_message(f"ℹ️ {msg}")
+        
+        deleted_files = 0
+        deleted_dirs = 0
+        errors = []
+        
+        # Si no hay items (directorio vacío), proceder a eliminar el directorio
+        if not items:
+            log_message(f"📁 Directorio vacío: {dir_name}")
+        else:
+            # Procesar archivos primero
+            for item in items:
+                if item["name"] in [".", ".."]:
+                    continue
+                    
+                if item["type"] == "file":
+                    log_message(f"🗑️ Eliminando archivo: {item['name']}")
+                    success, message = delete_file(ftp_socket, item["name"])
+                    if success:
+                        deleted_files += 1
+                        log_message(f"✅ Eliminado: {item['name']}")
+                    else:
+                        error_msg = f"Error con {item['name']}: {message}"
+                        errors.append(error_msg)
+                        log_message(f"❌ {error_msg}")
+                        
+            # Procesar subdirectorios después
+            for item in items:
+                if item["name"] in [".", ".."]:
+                    continue
+                    
+                if item["type"] == "dir":
+                    log_message(f"📁 Procesando subdirectorio: {item['name']}")
+                    
+                    success, message = delete_directory_recursive(ftp_socket, item["name"])
+                    
+                    if success:
+                        deleted_dirs += 1
+                        log_message(f"✅ Subdirectorio eliminado: {item['name']}")
+                    else:
+                        error_msg = f"Error con directorio {item['name']}: {message}"
+                        errors.append(error_msg)
+                        log_message(f"❌ {error_msg}")
+
+        # Volver al directorio original para eliminar la carpeta principal
+        log_message(f"↩️ Volviendo al directorio original para eliminar {dir_name}")
+        change_dir(ftp_socket, "..")
+
+        # Ahora eliminar el directorio principal (que debería estar vacío)
+        log_message(f"🗑️ Eliminando directorio principal: {dir_name}")
+        success, message = delete_directory(ftp_socket, dir_name)
+        
+        if not success:
+            error_msg = f"Error eliminando directorio principal {dir_name}: {message}"
+            errors.append(error_msg)
+            log_message(f"❌ {error_msg}")
+        else:
+            log_message(f"✅ Directorio principal eliminado: {dir_name}")
+
+        if errors:
+            return False, f"Eliminación parcial. Archivos: {deleted_files}, Carpetas: {deleted_dirs}. Errores: {len(errors)}"
+        else:
+            return True, f"Eliminación completada. Archivos: {deleted_files}, Carpetas: {deleted_dirs}"
+            
+    except Exception as e:
+        log_message(f"💥 Error crítico en eliminación recursiva: {e}")
+        # Intentar volver al directorio original incluso en caso de error
+        try:
+            change_dir(ftp_socket, original_dir)
+        except:
+            pass
+        return False, f"Error en eliminación recursiva: {e}"
+    
