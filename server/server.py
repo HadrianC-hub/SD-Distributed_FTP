@@ -772,3 +772,29 @@ def cmd_STOR(arg, session, append=False, unique=False):
             target = os.path.join(session.current_dir, unique_name)
 
         if not append and os.path.exists(target):
+            session.client_socket.send(b"550 File already exists.\r\n")
+            close_data_socket(session)
+            return
+
+        # abrir archivo
+        write_mode = 'ab' if append else 'wb'
+        if session.type == 'A':
+            write_mode = 'a' if append else 'w'
+
+        # enviar 150
+        if session.type == 'A':
+            session.client_socket.sendall(b"150 Opening ASCII mode data connection for file transfer.\r\n")
+        else:
+            session.client_socket.sendall(b"150 Opening binary mode data connection for file transfer.\r\n")
+
+        with open(target, write_mode) as f:
+            if session.mode == 'S':
+                while True:
+                    chunk = session.data_socket.recv(BUFFER_SIZE)
+                    if not chunk:
+                        break
+                    if session.type == 'A':
+                        f.write(chunk.decode(errors='ignore'))
+                    else:
+                        f.write(chunk)
+            else:
