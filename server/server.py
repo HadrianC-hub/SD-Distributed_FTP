@@ -746,3 +746,29 @@ def cmd_RETR(arg, session):
         session.client_socket.sendall(b"226 Transfer complete.\r\n")
     except Exception as e:
         close_data_socket(session)
+        session.client_socket.sendall(b"451 Requested action aborted: local error in processing.\r\n")
+
+def cmd_STOR(arg, session, append=False, unique=False):
+    if not arg:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+        return
+    if not session.data_socket:
+        conn = accept_passive_connection(session)
+        if not conn:
+            session.client_socket.send(b"425 Use PASV or PORT first.\r\n")
+            return
+    try:
+        # preparar path
+        try:
+            target = safe_path(session, arg)
+        except PermissionError:
+            session.client_socket.send(b"550 Access denied.\r\n")
+            close_data_socket(session)
+            return
+
+        if unique:
+            filename = os.path.basename(arg)
+            unique_name = generate_unique_filename(session.current_dir, filename)
+            target = os.path.join(session.current_dir, unique_name)
+
+        if not append and os.path.exists(target):
