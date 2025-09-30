@@ -689,3 +689,191 @@ def get_transfer_type_display():
     current_type = st.session_state.transfer_type
     return "Binario" if current_type == 'I' else "ASCII"
 
+# --- REALIZAR DESCARGA ---
+
+def confirm_and_download(item_name, item_type):
+    """Maneja la confirmación y descarga de archivos/directorios."""
+
+    ensure_download_dir()
+    
+    if item_type == "file":
+        # Para archivos, descargar directamente en la carpeta de descargas
+        local_path = os.path.join(st.session_state.download_path, item_name)
+        success, message = download_file(st.session_state.ftp_client, item_name, local_path)
+    else:
+        # Para carpetas, usar descarga recursiva
+        success, message = download_directory_recursive(st.session_state.ftp_client, item_name, st.session_state.download_path)
+    
+    if success:
+        st.success(message)
+        log_message(f"🎉 Descarga exitosa de {item_type}: {item_name}")
+        log_message(f"↩️ Volviendo a directorio original")
+        change_dir(st.session_state.ftp_client, "..")
+
+    else:
+        st.error(message)
+        log_message(f"💥 Error descargando {item_type}: {item_name} - {message}")
+    
+    # Limpiar el estado de confirmación
+    st.session_state.download_candidate = None
+    request_rerun()
+
+def ensure_download_dir():
+    """Asegura que el directorio de descargas exista."""
+    download_path = os.path.abspath(st.session_state.download_path)
+    if not os.path.exists(download_path):
+        os.makedirs(download_path, exist_ok=True)
+        log_message(f"📁 Directorio de descargas creado: {download_path}")
+    st.session_state.download_path = download_path  # Actualizar a ruta absoluta
+
+def download_file(ftp_client, remote_filename, local_path):
+    """Descarga un archivo individual usando RETR."""
+    try:
+        # Asegurar que el directorio local existe
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        
+        # Usar ruta absoluta
+        local_path = os.path.abspath(local_path)
+        
+        log_message(f"📄 Iniciando descarga: {remote_filename} -> {local_path}")
+        
+        # FORZAR TIPO BINARIO para archivos
+        try:
+            binary_response = client.generic_command_by_type(ftp_client, "I", command="TYPE", command_type='A')
+            log_message(f"🔧 Cambiando a tipo binario: {binary_response}")
+
+            # 🔥 Sincronizar estado
+            st.session_state.transfer_type = 'I'
+            client.TYPE = 'I'
+
+        except Exception as e:
+            log_message(f"⚠️ No se pudo cambiar a binario: {e}")
+        
+        # Descargar archivo
+        result = client.cmd_RETR(ftp_client, remote_filename, local_path)
+        
+        # Verificar si cmd_RETR retornó una tupla (success, message)
+        if isinstance(result, tuple) and len(result) == 2:
+            success, message = result
+        else:
+            # Si no retornó una tupla, asumir error
+            success = False
+            message = f"Respuesta inesperada de cmd_RETR: {result}"
+        
+        if success:
+            log_message(f"✅ Archivo descargado exitosamente: {local_path}")
+            return True, f"Archivo descargado: {os.path.basename(local_path)}"
+        else:
+            log_message(f"❌ Error en descarga: {message}")
+            return False, message
+            
+    except Exception as e:
+        error_msg = f"Error al descargar archivo {remote_filename}: {e}"
+        log_message(f"💥 {error_msg}")
+        return False, error_msg
+
+def download_directory_recursive(ftp_client, remote_dir, local_base_path):
+    """Descarga recursivamente una carpeta y todo su contenido."""
+    try: 
+        # Guardar directorio actual ANTES de cualquier cambio
+        original_dir = get_current_dir(ftp_client)
+        log_message(f"🔍 Iniciando descarga de: {remote_dir} desde {original_dir}")
+        
+        # FORZAR TIPO BINARIO al inicio de la descarga recursiva
+        try:
+            binary_response = client.generic_command_by_type(ftp_client, "I", command="TYPE", command_type='A')
+            log_message(f"🔧 Cambiando a tipo binario: {binary_response}")
+
+            # 🔥 Sincronizar estado
+            st.session_state.transfer_type = 'I'
+            client.TYPE = 'I'
+
+        except Exception as e:
+            log_message(f"⚠️ No se pudo cambiar a binario: {e}")
+        
+        # Cambiar al directorio remoto
+        success, message = change_dir(ftp_client, remote_dir)
+        if not success:
+            return False, f"No se pudo acceder al directorio: {remote_dir} - {message}"
+        
+        current_remote_dir = get_current_dir(ftp_client)
+        log_message(f"📁 Cambiado a directorio remoto: {current_remote_dir}")
+        
+        # Crear directorio local - usar solo el nombre de la carpeta, no la ruta completa
+        local_dir = os.path.join(local_base_path, os.path.basename(remote_dir))
+        os.makedirs(local_dir, exist_ok=True)
+        log_message(f"📂 Directorio local creado: {local_dir}")
+        
+        # Obtener listado del directorio
+        items, messages = list_directory(ftp_client)
+        for msg in messages:
+            log_message(f"ℹ️ {msg}")
+        
+        downloaded_files = 0
+        downloaded_dirs = 0
+        errors = []
+        
+        # Si no hay items (directorio vacío), igualmente considerarlo éxito
+        if not items:
+            log_message(f"📁 Directorio vacío: {remote_dir}")
+        
+        # Procesar archivos primero
+        for item in items:
+            if item["name"] in [".", ".."]:
+                continue
+                
+            if item["type"] == "file":
+                local_file_path = os.path.join(local_dir, item["name"])
+                log_message(f"⬇️ Descargando archivo: {item['name']} -> {local_file_path}")
+                
+                success, message = download_file(ftp_client, item["name"], local_file_path)
+                if success:
+                    downloaded_files += 1
+                    log_message(f"✅ Descargado: {item['name']}")
+                else:
+                    error_msg = f"Error con {item['name']}: {message}"
+                    errors.append(error_msg)
+                    log_message(f"❌ {error_msg}")
+                    
+        # Procesar subdirectorios después
+        for item in items:
+            if item["name"] in [".", ".."]:
+                continue
+                
+            if item["type"] == "dir":
+                log_message(f"📁 Procesando subdirectorio: {item['name']}")
+                
+                # Guardar el directorio actual antes de la recursión
+                current_before_recursion = get_current_dir(ftp_client)
+                
+                success, message = download_directory_recursive(ftp_client, item["name"], local_dir)
+                
+                if success:
+                    downloaded_dirs += 1
+                    log_message(f"✅ Subdirectorio descargado: {item['name']}")
+                else:
+                    error_msg = f"Error con directorio {item['name']}: {message}"
+                    errors.append(error_msg)
+                    log_message(f"❌ {error_msg}")
+                
+                # Volver al directorio anterior usando ".." en lugar de rutas absolutas
+                log_message(f"↩️ Volviendo al directorio padre usando '..' desde {get_current_dir(ftp_client)}")
+                success, _ = change_dir(ftp_client, "..")
+                if not success:
+                    # Si falla con "..", intentar volver al directorio guardado
+                    log_message(f"⚠️ No se pudo volver al directorio padre")
+
+        if errors:
+            return False, f"Descarga parcial. Archivos: {downloaded_files}, Carpetas: {downloaded_dirs}. Errores: {len(errors)}"
+        else:
+            return True, f"Descarga completada. Archivos: {downloaded_files}, Carpetas: {downloaded_dirs}"
+            
+    except Exception as e:
+        log_message(f"💥 Error crítico en descarga recursiva: {e}")
+        # Intentar volver al directorio original incluso en caso de error
+        try:
+            change_dir(ftp_client, original_dir)
+        except:
+            pass
+        return False, f"Error en descarga recursiva: {e}"
+
