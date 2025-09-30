@@ -625,3 +625,67 @@ def delete_directory_recursive(ftp_socket, dir_name):
             pass
         return False, f"Error en eliminación recursiva: {e}"
     
+# --- ALTERNAR MODO Y TIPO DE TRANSFERENCIA ---
+
+def toggle_transfer_mode():
+    """Alterna entre los modos Stream y Block"""
+    try:
+        # Usar el estado de la sesión como fuente de verdad
+        current_mode = st.session_state.transfer_mode
+        new_mode = 'B' if current_mode == 'S' else 'S'
+        
+        # Enviar comando MODE al servidor
+        response = client.generic_command_by_type(st.session_state.ftp_client, new_mode, command="MODE", command_type='A')
+        
+        if response.startswith('2'):
+            # Actualizar ambos: estado de sesión y variable global
+            st.session_state.transfer_mode = new_mode
+            client.MODE = new_mode
+            mode_name = "Block" if new_mode == 'B' else "Stream"
+            log_message(f"✅ Modo de transferencia cambiado a: {mode_name}")
+            return True, f"Modo cambiado a {mode_name}"
+        else:
+            log_message(f"❌ Error al cambiar modo: {response}")
+            return False, f"Error del servidor: {response}"
+            
+    except Exception as e:
+        error_msg = f"Error al cambiar modo de transferencia: {e}"
+        log_message(f"💥 {error_msg}")
+        return False, error_msg
+
+def toggle_transfer_type():
+    """Alterna entre los tipos ASCII y Binario"""
+    try:
+        # Usar el estado de la sesión como fuente de verdad
+        current_type = st.session_state.transfer_type
+        new_type = 'I' if current_type == 'A' else 'A'
+        
+        # Enviar comando TYPE al servidor
+        response = client.generic_command_by_type(st.session_state.ftp_client, new_type, command="TYPE", command_type='A')
+        
+        if response.startswith('2'):
+            # Actualizar ambos: estado de sesión y variable global
+            st.session_state.transfer_type = new_type
+            client.TYPE = new_type
+            type_name = "Binario" if new_type == 'I' else "ASCII"
+            log_message(f"✅ Tipo de transferencia cambiado a: {type_name}")
+            return True, f"Tipo cambiado a {type_name}"
+        else:
+            log_message(f"❌ Error al cambiar tipo: {response}")
+            return False, f"Error del servidor: {response}"
+            
+    except Exception as e:
+        error_msg = f"Error al cambiar tipo de transferencia: {e}"
+        log_message(f"💥 {error_msg}")
+        return False, error_msg
+
+def get_transfer_mode_display():
+    """Obtiene el texto para mostrar el modo actual"""
+    current_mode = st.session_state.transfer_mode
+    return "Block" if current_mode == 'B' else "Stream"
+
+def get_transfer_type_display():
+    """Obtiene el texto para mostrar el tipo actual"""
+    current_type = st.session_state.transfer_type
+    return "Binario" if current_type == 'I' else "ASCII"
+
