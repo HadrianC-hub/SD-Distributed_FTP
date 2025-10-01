@@ -1282,3 +1282,13 @@ def handle_directory_navigation(target):
         st.session_state.navigation_lock = False
         request_rerun()
 
+# --- OTRAS FUNCIONES AUXILIARES ---
+
+def force_binary_type(ftp_client):
+        try:
+            binary_response = client.generic_command_by_type(ftp_client, "I", command="TYPE", command_type='A')
+            log_message(f"🔧 Cambiando a tipo binario: {binary_response}")
+            st.session_state.transfer_type = 'I'
+            client.TYPE = 'I'
+        except Exception as e:
+            log_message(f"⚠️ No se pudo cambiar a binario: {e}")
