@@ -9,10 +9,8 @@ import client as client
 
 st.set_page_config(page_title="Cliente FTP", page_icon="📂", layout="wide")
 
-
 # -----------------------------------------------------------------------------------------------------
 # Estado inicial
-
 # -----------------------------------------------------------------------------------------------------
 if "console" not in st.session_state:
     st.session_state.console = []
@@ -73,10 +71,8 @@ if "_need_rerun" not in st.session_state:
 if "_last_rerun_time" not in st.session_state:
     st.session_state["_last_rerun_time"] = 0.0
 
-
 # -----------------------------------------------------------------------------------------------------
 # Funciones auxiliares
-
 # -----------------------------------------------------------------------------------------------------
 
 # --- FUNCIONES PARA RECARGAR PÁGINA SIN ROMPERLA (Comptibilidad con Docker) ---
@@ -1293,10 +1289,8 @@ def force_binary_type(ftp_client):
         except Exception as e:
             log_message(f"⚠️ No se pudo cambiar a binario: {e}")
 
-
 # -----------------------------------------------------------------------------------------------------
 # Barra lateral
-
 # -----------------------------------------------------------------------------------------------------
 st.sidebar.title("📊 Panel de Control")
 
@@ -1438,10 +1432,8 @@ st.sidebar.markdown("")
 st.sidebar.caption("Cliente FTP - v1.0")
 st.sidebar.caption("Desarrollado por Adrian Hernández Castellanos y Laura Martir Beltrán")
     
-
 # -----------------------------------------------------------------------------------------------------
 # Página de gestión FTP
-
 # -----------------------------------------------------------------------------------------------------
 if st.session_state.ftp_client:
 
@@ -1900,3 +1892,127 @@ if st.session_state.ftp_client:
         else:
             # En directorios no raíz, siempre deberíamos tener al menos ".."
             st.info("No se encontraron archivos o directorios en esta carpeta")
+# -----------------------------------------------------------------------------------------------------
+# Página de login
+# -----------------------------------------------------------------------------------------------------
+else:
+    st.title("Cliente FTP Distribuido")
+
+    # Crear un contenedor centrado para el formulario de login
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        # Contenedor con borde y sombra para el formulario
+        st.markdown("""
+            <style>
+            .login-container {
+                background-color: #0e1117;
+                padding: 30px;
+                border-radius: 10px;
+                border: 1px solid #262730;
+                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                margin: 20px 0;
+            }
+            .login-title {
+                text-align: center;
+                margin-bottom: 25px;
+                color: #fafafa;
+                font-size: 1.5em;
+            }
+            </style>
+        """, unsafe_allow_html=True)
+        
+        # Título del formulario
+        st.markdown('<div class="login-title">🔐 Iniciar Sesión FTP</div>', unsafe_allow_html=True)
+        
+        # Inicializar credenciales si no existen
+        if "host" not in st.session_state:
+            st.session_state.host = "127.0.0.1"
+        if "port" not in st.session_state:
+            st.session_state.port = 21
+        if "usuario" not in st.session_state:
+            st.session_state.usuario = ""
+        if "password" not in st.session_state:
+            st.session_state.password = ""
+
+        # Campos del formulario dentro del contenedor
+        host_input = st.text_input("Servidor", value=st.session_state.host, key="host_input")
+        port_input = st.number_input("Puerto", min_value=1, max_value=65535, value=st.session_state.port, key="port_input")
+        usuario_input = st.text_input("Usuario", value=st.session_state.usuario, key="usuario_input")
+        password_input = st.text_input("Contraseña", type="password", value=st.session_state.password, key="password_input")
+        
+        # Actualizar el estado de la sesión con los valores actuales de los campos
+        st.session_state.host = host_input
+        st.session_state.port = port_input
+        st.session_state.usuario = usuario_input
+        st.session_state.password = password_input
+
+        # Botón de conexión centrado
+        col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
+        with col_btn2:
+            if st.button("🚀 Conectar", use_container_width=True):
+                start_connection()
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    # Espacio adicional debajo del formulario
+    st.markdown("<br><br>", unsafe_allow_html=True)
+# -----------------------------------------------------------------------------------------------------
+# Consola
+# -----------------------------------------------------------------------------------------------------
+if st.session_state.show_console:
+    st.subheader("Consola")
+    
+    # Botón para limpiar consola
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        if st.button("🧹 Limpiar Consola"):
+            clear_console()
+            request_rerun()
+    
+    if not st.session_state.console:
+        st.markdown("(Sin mensajes aún)")
+    else:
+        html_lines = []
+        for msg in st.session_state.console:
+            for line in msg.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    color = "white"
+                elif stripped[0] in ["1", "2"]:
+                    color = "green"
+                elif stripped[0] == "3":
+                    color = "blue"
+                elif stripped[0] in ["4", "5"]:
+                    color = "red"
+                else:
+                    color = "white"
+                escaped_line = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#x27;")
+                html_lines.append(f'<span style="color:{color}">{escaped_line}</span><br>')
+
+        console_html = "".join(html_lines)
+        
+        container_id = f"console_{int(time.time() * 1000)}"
+        
+        st.markdown(
+            f'''
+            <div id="{container_id}" style="
+                background:#071127; 
+                padding:10px; 
+                font-family:monospace; 
+                height:300px;
+                overflow-y:auto;
+                border: 1px solid #333;
+                border-radius:4px;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+            ">
+                {console_html}
+            </div>
+            ''',
+            unsafe_allow_html=True
+        )
+
+# Al final del script: si alguna función pidió rerun, ejecutarlo UNA sola vez (Problemas con Docker)
+if st.session_state.pop("_need_rerun", False):
+    cooldown = st.session_state.pop("_requested_rerun_cooldown", 0.5)
+    if can_do_action("global_rerun", cooldown=cooldown):
+        st.rerun()
