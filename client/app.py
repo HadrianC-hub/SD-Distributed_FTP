@@ -1292,3 +1292,148 @@ def force_binary_type(ftp_client):
             client.TYPE = 'I'
         except Exception as e:
             log_message(f"⚠️ No se pudo cambiar a binario: {e}")
+
+
+# -----------------------------------------------------------------------------------------------------
+# Barra lateral
+
+# -----------------------------------------------------------------------------------------------------
+st.sidebar.title("📊 Panel de Control")
+
+# Estado de conexión
+if st.session_state.ftp_client:
+    st.sidebar.success(f"🔗 Conectado - ID: {st.session_state.connection_id}")
+else:
+    st.sidebar.warning("🔌 No conectado")
+
+st.sidebar.markdown("---")
+
+# --- GRUPO 1: CONEXIÓN ---
+if st.session_state.ftp_client:
+    st.sidebar.subheader("🔗 Conexión")
+    
+    col_conn1, col_conn2 = st.sidebar.columns(2)
+    
+    with col_conn1:
+        if st.button("🔄 Reiniciar", use_container_width=True, key="restart_btn", help="Reiniciar la conexión FTP"):
+            restart_connection()
+    
+    with col_conn2:
+        if st.button("🚪 Desconectar", use_container_width=True, key="disconnect_btn", type="secondary", help="Cerrar sesión FTP"):
+            if st.session_state.ftp_client:
+                try:
+                    client.generic_command_by_type(st.session_state.ftp_client, command="QUIT", command_type='B')
+                except:
+                    pass
+                try:
+                    st.session_state.ftp_client.close()
+                except:
+                    pass
+            st.session_state.ftp_client = None
+            st.session_state.keep_alive_started = False
+            request_rerun()
+
+    st.sidebar.markdown("---")
+
+# --- GRUPO 2: GESTIÓN DE ARCHIVOS ---
+if st.session_state.ftp_client:
+    st.sidebar.subheader("📁 Gestión de Archivos")
+    
+    # Botones de gestión de archivos
+    if st.sidebar.button("📁 Crear Carpeta", 
+                use_container_width=True,
+                key="create_folder_sidebar"):
+        start_folder_creation()
+    
+    if st.sidebar.button("📤 Subir Archivos", 
+                use_container_width=True,
+                key="upload_sidebar"):
+        start_upload()
+    
+    if st.sidebar.button("🦄 Subir STOU", 
+                use_container_width=True,
+                key="stou_sidebar",
+                help="Subir con nombre único"):
+        start_stou_upload()
+
+    st.sidebar.markdown("---")
+
+# --- GRUPO 3: CONFIGURACIÓN DE TRANSFERENCIA ---
+if st.session_state.ftp_client:
+    st.sidebar.subheader("⚡ Transferencia")
+    
+    # Configuración de modo y tipo
+    col_trans1, col_trans2 = st.sidebar.columns(2)
+    
+    with col_trans1:
+        current_mode = get_transfer_mode_display()
+        mode_icon = "🔄" if st.session_state.transfer_mode == 'S' else "📦"
+        if st.button(f"{mode_icon} {current_mode}", 
+                    use_container_width=True,
+                    key="mode_toggle",
+                    help=f"Cambiar a {'Block' if st.session_state.transfer_mode == 'S' else 'Stream'}"):
+            success, message = toggle_transfer_mode()
+            if success:
+                st.sidebar.success(message)
+            else:
+                st.sidebar.error(message)
+            request_rerun()
+    
+    with col_trans2:
+        current_type = get_transfer_type_display()
+        type_icon = "📝" if st.session_state.transfer_type == 'A' else "🔢"
+        if st.button(f"{type_icon} {current_type}", 
+                    use_container_width=True,
+                    key="type_toggle",
+                    help=f"Cambiar a {'Binario' if st.session_state.transfer_type == 'A' else 'ASCII'}"):
+            success, message = toggle_transfer_type()
+            if success:
+                st.sidebar.success(message)
+            else:
+                st.sidebar.error(message)
+            request_rerun()
+    
+    # Mostrar estado actual
+    st.sidebar.caption(f"Modo: {current_mode} | Tipo: {current_type}")
+
+    st.sidebar.markdown("---")
+
+# --- GRUPO 4: CONFIGURACIÓN DE DESCARGAS ---
+if st.session_state.ftp_client:
+    with st.sidebar.expander("📥 Configuración Descargas", expanded=False):
+        download_path = st.text_input(
+            "Directorio de descargas:",
+            value=st.session_state.download_path,
+            key="download_path_input",
+            help="Ruta donde se guardarán las descargas"
+        )
+        st.session_state.download_path = download_path
+        
+        if st.button("📁 Crear Directorio", 
+                    use_container_width=True,
+                    key="create_download_dir"):
+            ensure_download_dir()
+            st.sidebar.success(f"✅ Directorio listo")
+        
+        # Mostrar ruta absoluta actual
+        st.caption(f"Ruta: {os.path.abspath(st.session_state.download_path)}")
+
+    st.sidebar.markdown("---")
+
+# --- GRUPO 5: CONSOLA Y MANTENIMIENTO ---
+st.sidebar.subheader("🔧 Utilidades")
+
+# Botón de consola
+console_icon = "🖥️" if not st.session_state.show_console else "📺"
+console_text = "Mostrar Consola" if not st.session_state.show_console else "Ocultar Consola"
+if st.sidebar.button(f"{console_icon} {console_text}", 
+            use_container_width=True,
+            key="console_toggle_btn"):
+    toggle_console()
+
+# --- ESPACIADO FINAL ---
+st.sidebar.markdown("")
+st.sidebar.markdown("")
+st.sidebar.markdown("")
+st.sidebar.caption("Cliente FTP - v1.0")
+st.sidebar.caption("Desarrollado por Adrian Hernández Castellanos y Laura Martir Beltrán")
