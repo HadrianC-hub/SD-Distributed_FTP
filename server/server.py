@@ -798,3 +798,29 @@ def cmd_STOR(arg, session, append=False, unique=False):
                     else:
                         f.write(chunk)
             else:
+                # modo bloque: lectura simplificada
+                while True:
+                    header = session.data_socket.recv(3)
+                    if not header:
+                        break
+                    try:
+                        block_type, block_size = struct.unpack(">BH", header)
+                    except Exception:
+                        break
+                    if block_type == 0x80:
+                        break
+                    data = b''
+                    remain = block_size
+                    while remain > 0:
+                        part = session.data_socket.recv(remain)
+                        if not part:
+                            break
+                        data += part
+                        remain -= len(part)
+                    if session.type == 'A':
+                        f.write(data.decode(errors='ignore'))
+                    else:
+                        f.write(data)
+        close_data_socket(session)
+        # STOU devuelve nombre si unique
+        if unique:
