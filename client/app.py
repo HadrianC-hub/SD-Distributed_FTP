@@ -1437,3 +1437,466 @@ st.sidebar.markdown("")
 st.sidebar.markdown("")
 st.sidebar.caption("Cliente FTP - v1.0")
 st.sidebar.caption("Desarrollado por Adrian Hernández Castellanos y Laura Martir Beltrán")
+    
+
+# -----------------------------------------------------------------------------------------------------
+# Página de gestión FTP
+
+# -----------------------------------------------------------------------------------------------------
+if st.session_state.ftp_client:
+
+    st.title("Gestión FTP")
+    
+    if st.sidebar.button("Desconectar"):
+        if st.session_state.ftp_client:
+            try:
+                client.generic_command_by_type(st.session_state.ftp_client, command="QUIT", command_type='B')
+            except:
+                pass
+            try:
+                st.session_state.ftp_client.close()
+            except:
+                pass
+        # limpieza adicional para sockets de datos persistentes
+        try:
+            client.cleanup_data_socket()
+        except Exception:
+            pass
+
+        st.session_state.ftp_client = None
+        request_rerun()
+
+    # Obtener directorio actual
+    try:
+        current_dir = get_current_dir(st.session_state.ftp_client)
+        st.session_state.current_dir = current_dir
+    except Exception as e:
+        st.error(f"No se pudo obtener el directorio actual: {e}")
+        current_dir = st.session_state.current_dir
+
+    # Barra de direcciones
+    st.text_input("Ruta actual:", value=current_dir, disabled=True)
+
+    # Listado de archivos y carpetas
+    try:
+        items, messages = list_directory(st.session_state.ftp_client)
+        for msg in messages:
+            log_message(msg)
+    except Exception as e:
+        st.error(f"No se pudo listar el directorio: {e}")
+        items = []
+
+    # Después de obtener items, messages
+    st.write("Contenido del directorio:")
+
+    # Diálogo de creación de carpeta
+    if st.session_state.creating_folder:
+        st.markdown("---")
+        st.subheader("Crear Nueva Carpeta")
+        
+        folder_name = st.text_input(
+            "Nombre de la carpeta:",
+            value=st.session_state.new_folder_name,
+            key="new_folder_input",
+            placeholder="Ingresa el nombre de la carpeta..."
+        )
+        st.session_state.new_folder_name = folder_name
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("✅ Crear", use_container_width=True):
+                confirm_create_folder()
+        with col2:
+            if st.button("❌ Cancelar", use_container_width=True, key="cancel_folder"):
+                cancel_create_folder()
+
+    # Preparar los elementos para la tabla - SIEMPRE mostrar tabla si no estamos en raíz
+    # Filtrar elementos válidos
+    valid_items = []
+    if items:
+        valid_items = [item for item in items if item.get("name") and item["name"] not in [".", ".."]]
+    
+    # Agregar el elemento ".." al principio si no estamos en la raíz
+    # Esto asegura que siempre podamos navegar hacia atrás
+    if current_dir != "/":
+        parent_item = {
+            "name": "..",
+            "type": "dir",
+            "permissions": "",
+            "links": "",
+            "owner": "",
+            "group": "",
+            "size": "",
+            "date": "",
+            "raw_line": "Parent directory"
+        }
+        valid_items.insert(0, parent_item)
+    
+    # Ordenar elementos: primero carpetas, luego archivos, alfabéticamente
+    if valid_items:
+        # Separar carpetas y archivos
+        folders = [item for item in valid_items if item["type"].lower() == "dir"]
+        files = [item for item in valid_items if item["type"].lower() == "file"]
+        
+        # Ordenar alfabéticamente
+        folders_sorted = sorted(folders, key=lambda x: x["name"].lower())
+        files_sorted = sorted(files, key=lambda x: x["name"].lower())
+        
+        # Reconstruir la lista: primero ".." (si existe), luego carpetas, luego archivos
+        valid_items = []
+        
+        # Agregar ".." primero si existe
+        parent_item = None
+        for item in folders:
+            if item["name"] == "..":
+                parent_item = item
+                break
+        
+        if parent_item:
+            valid_items.append(parent_item)
+            # Remover ".." de folders_sorted para no duplicarlo
+            folders_sorted = [item for item in folders_sorted if item["name"] != ".."]
+        
+        # Agregar el resto de carpetas ordenadas
+        valid_items.extend(folders_sorted)
+        # Agregar archivos ordenados
+        valid_items.extend(files_sorted)
+
+    # Mostrar tabla si hay elementos o si no estamos en la raíz (para mostrar "..")
+    if valid_items or current_dir != "/":
+
+        # Encabezados de la tabla con columna de acciones
+        col1, col2, col3, col4, col5, col6, col7, col8 = st.columns([0.4, 1, 0.8, 0.8, 0.8, 0.8, 0.8, 1.8])
+        
+        with col1:
+            st.write("**Tipo**")
+        with col2:
+            st.write("**Nombre**")
+        with col3:
+            st.write("**Permisos**")
+        with col4:
+            st.write("**Propietario**")
+        with col5:
+            st.write("**Grupo**")
+        with col6:
+            st.write("**Tamaño**")
+        with col7:
+            st.write("**Fecha**")
+        with col8:
+            st.write("**Acciones**")
+        
+        st.markdown("---")
+        
+        # Mostrar cada elemento en una fila de la tabla
+        for item in valid_items:
+            col1, col2, col3, col4, col5, col6, col7, col8 = st.columns([0.4, 1, 0.8, 0.8, 0.8, 0.8, 0.8, 1.8])
+            
+            with col1:
+                if item["type"].lower() == "dir":
+                    st.write("📁")
+                elif item["type"].lower() == "link":
+                    st.write("🔗")
+                else:
+                    st.write("📄")
+            
+            with col2:
+                if item["type"].lower() == "dir":
+                    button_key = f"folder_{current_dir}_{item['name']}"
+                    if st.button(item["name"], key=button_key, 
+                            help=f"Clic para entrar al directorio {item['name']}"):
+                        handle_directory_navigation(item["name"])
+                else:
+                    st.write(item["name"])
+            
+            with col3:
+                # Mostrar permisos o guión si está vacío
+                permissions = item.get("permissions", "")
+                st.write(permissions if permissions else "-")
+            
+            with col4:
+                owner = item.get("owner", "")
+                st.write(owner if owner else "-")
+            
+            with col5:
+                group = item.get("group", "")
+                st.write(group if group else "-")
+            
+            with col6:
+                size = item.get("size", "")
+                st.write(size if size else "-")
+            
+            with col7:
+                date = item.get("date", "")
+                st.write(date if date else "-")
+
+            with col8:
+                # Crear un contenedor para los botones de acción
+                action_container = st.container()
+                
+                with action_container:
+                    col_del, col_down, col_rename, col_port, col_append = st.columns(5)
+
+                    with col_del:
+                        # No mostrar botón de eliminar para el directorio padre ".."
+                        if item["name"] != "..":
+                            if st.button("🗑️", key=f"delete_{item['name']}", help=f"Eliminar {item['name']}"):
+                                st.session_state.delete_candidate = (item['name'], item['type'])
+                                request_rerun()
+
+                    with col_down:
+                        # Botón de descarga normal (PASV) para todos los elementos excepto ".."
+                        if item["name"] != "..":
+                            if st.button("⬇️", key=f"download_{item['name']}", help=f"Descargar {item['name']} (PASV)"):
+                                st.session_state.download_candidate = (item['name'], item['type'])
+                                request_rerun()
+
+                    with col_rename:
+                        # Botón de renombrar para todos los elementos excepto ".."
+                        if item["name"] != "..":
+                            if st.button("✏️", key=f"rename_{item['name']}", help=f"Renombrar {item['name']}"):
+                                start_renaming(item['name'], item['type'])
+                                request_rerun()
+
+                    with col_port:
+                        # Botón de descarga con PORT solo para archivos (no carpetas)
+                        if item["name"] != ".." and item["type"] == "file":
+                            if st.button("🔌", key=f"download_port_{item['name']}", help=f"Descargar {item['name']} con PORT"):
+                                start_download_with_port(item['name'], item['type'])
+                                request_rerun()
+
+                    with col_append:
+                        # Botón de append solo para archivos (no carpetas) y no para ".."
+                        if item["name"] != ".." and item["type"] == "file":
+                            if st.button("📎", key=f"append_{item['name']}", help=f"Append a {item['name']}"):
+                                start_append(item['name'], item['type'])
+                                request_rerun()
+            
+            # Línea separadora sutil entre elementos
+            st.markdown("<hr style='margin: 2px 0; border: 0.5px solid #333;'>", 
+                    unsafe_allow_html=True)
+        
+        # Diálogo de subida
+        if st.session_state.upload_candidate:
+            st.markdown("---")
+            st.subheader("📤 Subir al Servidor")
+            
+            upload_path = st.text_input(
+                "Ruta local del archivo o carpeta a subir:",
+                value=st.session_state.upload_path,
+                key="upload_path_input",
+                placeholder="Ingresa la ruta absoluta del archivo o carpeta..."
+            )
+            st.session_state.upload_path = upload_path
+            
+            if upload_path:
+                if os.path.exists(upload_path):
+                    if os.path.isfile(upload_path):
+                        st.info(f"📄 Archivo a subir: {os.path.basename(upload_path)}")
+                    else:
+                        st.info(f"📁 Carpeta a subir: {os.path.basename(upload_path)}")
+                        st.warning("⚠️ Se subirá toda la carpeta y su contenido recursivamente")
+                else:
+                    st.error("❌ La ruta no existe")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Subir", use_container_width=True):
+                    st.session_state.uploading = True
+                    confirm_and_upload()
+            with col2:
+                if st.button("❌ Cancelar", use_container_width=True, key="cancel_upload"):
+                    cancel_upload()
+
+        # --- Diálogo de subida STOU ---
+        if st.session_state.stou_upload_candidate:
+            st.markdown("---")
+            st.subheader("🦄 Subir Archivos con STOU")
+            st.info("STOU: El servidor generará nombres únicos para cada archivo basados en sus nombres originales")
+            
+            # Mostrar lista actual de archivos
+            st.write("**Archivos en la lista de subida:**")
+            if st.session_state.stou_multiple_files:
+                for i, file_path in enumerate(st.session_state.stou_multiple_files):
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        st.write(f"📄 {os.path.basename(file_path)}")
+                        st.caption(f"Ruta: {file_path}")
+                    with col2:
+                        if st.button("🗑️", key=f"remove_stou_{i}", help=f"Eliminar {os.path.basename(file_path)} de la lista"):
+                            remove_file_from_stou_list(i)
+            else:
+                st.info("💡 No hay archivos en la lista. Agrega archivos usando el campo de abajo.")
+            
+            st.markdown("---")
+            st.write("**Agregar archivo a la lista:**")
+            
+            # Campo para agregar nueva ruta
+            new_file_path = st.text_input(
+                "Ruta del archivo a agregar:",
+                value=st.session_state.stou_upload_path,
+                key="stou_path_input",
+                placeholder="Ingresa la ruta absoluta del archivo..."
+            )
+            st.session_state.stou_upload_path = new_file_path
+            
+            # Botones de acción en columnas
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("➕ Agregar Archivo", use_container_width=True, key="add_file_stou"):
+                    add_file_to_stou_list()
+            
+            with col2:
+                if st.session_state.stou_multiple_files:
+                    if st.button("🚀 Subir Todos", use_container_width=True, key="confirm_stou", type="primary"):
+                        confirm_and_stou_upload()
+                else:
+                    st.button("🚀 Subir Todos", use_container_width=True, disabled=True, key="confirm_stou_disabled")
+            
+            with col3:
+                if st.button("❌ Cancelar", use_container_width=True, key="cancel_stou"):
+                    cancel_stou_upload()
+            
+            # Información adicional
+            if st.session_state.stou_multiple_files:
+                st.info(f"📊 Total de archivos en lista: {len(st.session_state.stou_multiple_files)}")
+            
+        # Diálogo de append
+        if st.session_state.append_candidate is not None:
+            remote_name, item_type = st.session_state.append_candidate
+            
+            st.info(f"Append al archivo remoto: '{remote_name}'")
+            st.warning("⚠️ El contenido del archivo local se agregará al final del archivo remoto.")
+            
+            local_path = st.text_input(
+                "Ruta local del archivo a appendear:",
+                value=st.session_state.append_local_path,
+                key="append_local_path_input",
+                placeholder="Ingresa la ruta absoluta del archivo local..."
+            )
+            st.session_state.append_local_path = local_path
+            
+            if local_path:
+                if os.path.exists(local_path) and os.path.isfile(local_path):
+                    st.info(f"📄 Archivo local: {os.path.basename(local_path)}")
+                else:
+                    st.error("❌ La ruta no existe o no es un archivo")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Append", use_container_width=True):
+                    st.session_state.appending = True
+                    confirm_and_append()
+            with col2:
+                if st.button("❌ Cancelar", use_container_width=True, key="cancel_append"):
+                    cancel_append()
+
+        # Diálogo de confirmación para eliminar
+        if st.session_state.delete_candidate is not None:
+            item_name, item_type = st.session_state.delete_candidate
+            item_type_str = "archivo" if item_type == "file" else "carpeta"
+            
+            # Mostrar advertencia especial para carpetas
+            if item_type == "dir":
+                st.warning(f"⚠️ **ADVERTENCIA**: Se eliminará la carpeta '{item_name}' y **TODO SU CONTENIDO** de forma permanente.")
+                st.error("🚨 **Esta acción no se puede deshacer**")
+                st.info("📋 **Proceso**: Se eliminarán primero todos los archivos, luego las subcarpetas, y finalmente la carpeta principal.")
+            else:
+                st.warning(f"¿Estás seguro de que deseas eliminar el {item_type_str} '{item_name}'?")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                button_text = "🗑️ Sí, eliminar TODO" if item_type == "dir" else "🗑️ Sí, eliminar"
+                button_type = "primary" if item_type == "dir" else "secondary"
+                if st.button(button_text, use_container_width=True, type=button_type):
+                    confirm_and_delete(item_name, item_type)
+            with col2:
+                if st.button("❌ Cancelar", use_container_width=True, key="cancel_delete"):
+                    st.session_state.delete_candidate = None
+                    request_rerun()
+
+        # Diálogo de confirmación para descargar
+        if st.session_state.download_candidate is not None:
+            item_name, item_type = st.session_state.download_candidate
+            item_type_str = "archivo" if item_type == "file" else "carpeta"
+            
+            st.info(f"¿Descargar el {item_type_str} '{item_name}' a '{st.session_state.download_path}'?")
+            
+            if item_type == "dir":
+                st.warning("⚠️ La descarga de carpetas puede tomar tiempo dependiendo del contenido.")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Sí, descargar", use_container_width=True):
+                    confirm_and_download(item_name, item_type)
+            with col2:
+                if st.button("❌ Cancelar", use_container_width=True, key="cancel_download"):
+                    st.session_state.download_candidate = None
+                    request_rerun()
+
+        # Diálogo de confirmación para descarga con PORT
+        if st.session_state.download_port_candidate is not None:
+            item_name, item_type = st.session_state.download_port_candidate
+            
+            st.info(f"¿Descargar el archivo '{item_name}' usando el comando PORT (modo activo)?")
+            st.warning("⚠️ El modo PORT requiere que el servidor pueda conectarse a tu cliente. Esto puede no funcionar en todas las configuraciones de red.")
+            
+            # Campos para configurar PORT
+            col1, col2 = st.columns(2)
+            with col1:
+                port_ip = st.text_input(
+                    "IP para PORT:",
+                    value=st.session_state.port_ip,
+                    key="port_ip_input",
+                    help="IP que el servidor usará para conectarse a ti"
+                )
+                st.session_state.port_ip = port_ip
+            
+            with col2:
+                port_port = st.text_input(
+                    "Puerto para PORT:",
+                    value=st.session_state.port_port,
+                    key="port_port_input",
+                    help="Puerto que el servidor usará para conectarse"
+                )
+                st.session_state.port_port = port_port
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Sí, usar PORT", use_container_width=True):
+                    confirm_and_download_with_port()
+            with col2:
+                if st.button("❌ Cancelar", use_container_width=True, key="cancel_port"):
+                    st.session_state.download_port_candidate = None
+                    st.session_state.using_port_mode = False
+                    request_rerun()
+
+        # Diálogo de renombrado
+        if st.session_state.renaming_candidate is not None:
+            old_name, item_type = st.session_state.renaming_candidate
+            item_type_str = "archivo" if item_type == "file" else "carpeta"
+            
+            st.info(f"Renombrar {item_type_str}: '{old_name}'")
+            
+            new_name = st.text_input(
+                "Nuevo nombre:",
+                value=st.session_state.new_name,
+                key="new_name_input",
+                placeholder=f"Ingresa el nuevo nombre para {old_name}..."
+            )
+            st.session_state.new_name = new_name
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Confirmar", use_container_width=True):
+                    confirm_rename()
+            with col2:
+                if st.button("❌ Cancelar", use_container_width=True, key="cancel_rename"):
+                    cancel_rename()
+    else:
+        # Solo mostrar este mensaje si estamos en la raíz y no hay elementos
+        if current_dir == "/":
+            st.info("El directorio raíz está vacío")
+        else:
+            # En directorios no raíz, siempre deberíamos tener al menos ".."
+            st.info("No se encontraron archivos o directorios en esta carpeta")
