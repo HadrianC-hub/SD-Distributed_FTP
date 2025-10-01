@@ -824,3 +824,81 @@ def cmd_STOR(arg, session, append=False, unique=False):
         close_data_socket(session)
         # STOU devuelve nombre si unique
         if unique:
+            session.client_socket.send(f"226 Transfer complete. Stored as {os.path.basename(target)}\r\n".encode())
+        else:
+            session.client_socket.sendall(b"226 Transfer complete.\r\n")
+    except Exception as e:
+        close_data_socket(session)
+        session.client_socket.sendall(b"451 Requested action aborted: local error in processing.\r\n")
+
+def cmd_APPE(arg, session):
+    return cmd_STOR(arg, session, append=True, unique=False)
+
+def cmd_STOU(arg, session):
+    # Ignorar arg y usar nombre único en el current_dir
+    filename = arg if arg else "file"
+    return cmd_STOR(filename, session, append=False, unique=True)
+
+def cmd_LIST(session):
+    if not session.data_socket:
+        conn = accept_passive_connection(session)
+        if not conn:
+            session.client_socket.send(b"425 Use PASV or PORT first.\r\n")
+            return
+    try:
+        session.client_socket.sendall(b"150 Opening data connection for file list.\r\n")
+        files = os.listdir(session.current_dir)
+        for filename in files:
+            file_path = os.path.join(session.current_dir, filename)
+            try:
+                file_stat = os.stat(file_path)
+                file_permissions = oct(file_stat.st_mode)[-3:]
+                file_size = file_stat.st_size
+                last_modified_time = time.strftime("%b %d %H:%M", time.localtime(file_stat.st_mtime))
+                if os.path.isdir(file_path):
+                    file_details = f"drwxr-xr-x   1 user group {file_size} {last_modified_time} {filename}\r\n"
+                else:
+                    file_details = f"-rw-r--r--   1 user group {file_size} {last_modified_time} {filename}\r\n"
+                session.data_socket.sendall(file_details.encode())
+            except Exception:
+                continue
+        close_data_socket(session)
+        session.client_socket.sendall(b"226 Transfer complete.\r\n")
+    except Exception:
+        close_data_socket(session)
+        session.client_socket.sendall(b"451 Requested action aborted: local error in processing.\r\n")
+
+def cmd_NLST(session):
+    if not session.data_socket:
+        conn = accept_passive_connection(session)
+        if not conn:
+            session.client_socket.send(b"425 Use PASV or PORT first.\r\n")
+            return
+    try:
+        session.client_socket.sendall(b"150 Opening data connection for file list.\r\n")
+        files = os.listdir(session.current_dir)
+        for filename in files:
+            session.data_socket.sendall(f"{filename}\r\n".encode())
+        close_data_socket(session)
+        session.client_socket.sendall(b"226 Transfer complete.\r\n")
+    except Exception:
+        close_data_socket(session)
+        session.client_socket.sendall(b"451 Requested action aborted: local error in processing.\r\n")
+
+def cmd_ABOR(session):
+    if session.data_socket:
+        try:
+            session.data_socket.close()
+        except Exception:
+            pass
+        session.data_socket = None
+        session.client_socket.sendall(b"426 Connection closed; transfer aborted.\r\n")
+    else:
+        session.client_socket.sendall(b"550 No active transfer to abort.\r\n")
+
+# -------------------- Parsing y control --------------------
+
+def handle_command_line(line, session):
+    """
+    Devuelve True si se debe terminar la conexión (QUIT), False en otro caso.
+    Actualiza session segun comandos.
