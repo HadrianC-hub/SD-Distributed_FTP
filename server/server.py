@@ -24,7 +24,7 @@ PORT = 21
 
 failed_attempts = {}
 
-class Session:
+class Session: # Clase para manejar sesiones del usuario
     def __init__(self, client_socket, client_addr):
         self.client_socket = client_socket
         self.client_addr = client_addr

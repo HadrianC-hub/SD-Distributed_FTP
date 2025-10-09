@@ -9,7 +9,7 @@ BUFFER_SIZE = 65536
 TYPE = 'A'
 MODE = 'S'
 DATA_SOCKET = None                  # Socket de transferencia utilizado para transferencia de datos
-DATA_SOCKET_IS_LISTENER = False
+DATA_SOCKET_IS_LISTENER = False     # Verifica que el socket en DATA_SOCKET esté o no en modo listening
 
 # Ejecución principal del cliente ---------------------------------------------------------------------------------------------
 

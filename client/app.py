@@ -72,10 +72,10 @@ if "_last_rerun_time" not in st.session_state:
     st.session_state["_last_rerun_time"] = 0.0
 
 # -----------------------------------------------------------------------------------------------------
-# Funciones auxiliares
+# Funciones
 # -----------------------------------------------------------------------------------------------------
 
-# --- FUNCIONES PARA RECARGAR PÁGINA SIN ROMPERLA (Comptibilidad con Docker) ---
+# --- FUNCIONES PARA RECARGAR PÁGINA ---
 
 # Cooldown por acción (evita ejecuciones repetidas en corto tiempo)
 def can_do_action(name: str, cooldown: float = 1.0) -> bool:
