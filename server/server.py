@@ -980,3 +980,81 @@ def handle_client(client_socket, address):
         client_socket.close()
         return
 
+    print(f"Conexión establecida desde {address}")
+    client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    session.client_socket.send(b"220 FTP Server Ready\r\n")
+
+    while True:
+        try:
+            # aplicar timeout por actividad
+            session.client_socket.settimeout(1.0)
+            try:
+                data = session.client_socket.recv(BUFFER_SIZE)
+            except socket.timeout:
+                # verificar inactividad
+                if time.time() - session.last_activity > INACTIVITY_TIMEOUT:
+                    session.client_socket.send(b"421 Service timeout.\r\n")
+                    break
+                continue
+            if not data:
+                break
+            try:
+                text = data.decode()
+            except Exception:
+                text = data.decode(errors='ignore')
+            session.last_activity = time.time()
+            print(f"Comando recibido de {address}: {text.strip()}")
+            should_quit = handle_command_line(text, session)
+            if should_quit:
+                break
+        except ConnectionResetError:
+            break
+        except Exception as e:
+            # no queremos que un cliente nos tumbe todo el server
+            print(f"Error en client handler {address}: {e}")
+            break
+
+    print(f"Conexión cerrada con {address}")
+    try:
+        if session.passive_listener:
+            session.passive_listener.close()
+    except Exception:
+        pass
+    close_data_socket(session)
+    try:
+        session.client_socket.close()
+    except Exception:
+        pass
+
+def start_ftp_server(listen_host=HOST, listen_port=PORT):
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind((listen_host, listen_port))
+    server_socket.listen(5)
+    print(f"Servidor FTP escuchando en {listen_host}:{listen_port}")
+    try:
+        while True:
+            client_socket, address = server_socket.accept()
+            t = threading.Thread(target=handle_client, args=(client_socket, address), daemon=True)
+            t.start()
+    except KeyboardInterrupt:
+        print("Servidor detenido por teclado")
+    finally:
+        server_socket.close()
+
+if __name__ == "__main__":
+    os.makedirs(os.path.abspath(SERVER_ROOT), exist_ok=True)
+    try:
+        # Solo en sistemas tipo Unix existe geteuid
+        if hasattr(os, "geteuid") and os.geteuid() != 0 and PORT < 1024:
+            print("Aviso: ejecutar sin root y puerto 21 fallará. Usando puerto 2121 para pruebas locales.")
+            start_ftp_server(listen_port=2121)
+        else:
+            start_ftp_server()
+    except AttributeError:
+        # En Windows no hay geteuid: usar puerto alternativo si es <1024
+        if PORT < 1024:
+            print("Aviso: en Windows no se puede usar el puerto 21 sin privilegios. Usando 2121.")
+            start_ftp_server(listen_port=2121)
+        else:
+            start_ftp_server()
