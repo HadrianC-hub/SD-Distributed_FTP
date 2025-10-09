@@ -902,3 +902,29 @@ def handle_command_line(line, session):
     """
     Devuelve True si se debe terminar la conexión (QUIT), False en otro caso.
     Actualiza session segun comandos.
+    """
+    line = line.rstrip('\r\n')
+    if not line:
+        return False
+    parts = line.split(' ', 1)
+    cmd = parts[0].upper()
+    arg = parts[1] if len(parts) > 1 else None
+
+    if cmd == "USER":
+        cmd_USER(arg, session)
+    elif cmd == "PASS":
+        cmd_PASS(arg, session)
+    elif cmd == "ACCT":
+        cmd_ACCT(arg, session)
+    elif cmd == "SMNT":
+        cmd_SMNT(arg, session)
+    elif cmd == "REIN":
+        cmd_REIN(session)
+    elif cmd == "QUIT":
+        session.client_socket.send(b"221 Goodbye.\r\n")
+        return True
+    elif cmd == "PWD":
+        cmd_PWD(session)
+    elif cmd == "CWD":
+        cmd_CWD(arg, session)
+    elif cmd == "CDUP":
