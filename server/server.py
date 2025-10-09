@@ -928,3 +928,55 @@ def handle_command_line(line, session):
     elif cmd == "CWD":
         cmd_CWD(arg, session)
     elif cmd == "CDUP":
+        cmd_CDUP(session)
+    elif cmd == "MKD":
+        cmd_MKD(arg, session)
+    elif cmd == "RMD":
+        cmd_RMD(arg, session)
+    elif cmd == "DELE":
+        cmd_DELE(arg, session)
+    elif cmd == "TYPE":
+        cmd_TYPE(arg, session)
+    elif cmd == "MODE":
+        cmd_MODE(arg, session)
+    elif cmd == "SYST":
+        cmd_SYST(session)
+    elif cmd == "STAT":
+        cmd_STAT(arg, session)
+    elif cmd == "HELP":
+        cmd_HELP(arg, session)
+    elif cmd == "RNFR":
+        cmd_RNFR(arg, session)
+    elif cmd == "RNTO":
+        cmd_RNTO(arg, session)
+    elif cmd == "NOOP":
+        cmd_NOOP(session)
+    elif cmd == "PASV":
+        cmd_PASV(session)
+    elif cmd == "RETR":
+        cmd_RETR(arg, session)
+    elif cmd == "STOR":
+        cmd_STOR(arg, session, append=False, unique=False)
+    elif cmd == "APPE":
+        cmd_APPE(arg, session)
+    elif cmd == "STOU":
+        cmd_STOU(arg, session)
+    elif cmd == "LIST":
+        cmd_LIST(session)
+    elif cmd == "NLST":
+        cmd_NLST(session)
+    elif cmd == "ABOR":
+        cmd_ABOR(session)
+    elif cmd == "PORT":
+        cmd_PORT(arg, session)
+    else:
+        session.client_socket.send(b"502 Command not implemented.\r\n")
+    return False
+
+def handle_client(client_socket, address):
+    session = Session(client_socket, address)
+    if check_failed_attempts(session.client_ip):
+        session.client_socket.send(b"421 Too many failed login attempts. Try again later.\r\n")
+        client_socket.close()
+        return
+
