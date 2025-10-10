@@ -436,7 +436,7 @@ def confirm_rename():
         st.success(response)
         log_message(f"✏️ Renombrado {item_type}: {old_name} -> {new_name}")
     else:
-        log_message(f"❌ Error renombrando {item_type}: {old_name} -> {new_name} - {message}")
+        log_message(f"❌ Error renombrando {item_type}: {old_name} -> {new_name} - {error}")
         st.error(error)
     
     # Limpiar el estado de renombrado
