@@ -70,6 +70,8 @@ if "_need_rerun" not in st.session_state:
     st.session_state["_need_rerun"] = False
 if "_last_rerun_time" not in st.session_state:
     st.session_state["_last_rerun_time"] = 0.0
+if "force_binary" not in st.session_state:
+    st.session_state.force_binary = True  # Por defecto True
 
 # -----------------------------------------------------------------------------------------------------
 # Funciones
@@ -734,16 +736,7 @@ def download_file(ftp_client, remote_filename, local_path):
         log_message(f"📄 Iniciando descarga: {remote_filename} -> {local_path}")
         
         # FORZAR TIPO BINARIO para archivos
-        try:
-            binary_response = client.generic_command_by_type(ftp_client, "I", command="TYPE", command_type='A')
-            log_message(f"🔧 Cambiando a tipo binario: {binary_response}")
-
-            # 🔥 Sincronizar estado
-            st.session_state.transfer_type = 'I'
-            client.TYPE = 'I'
-
-        except Exception as e:
-            log_message(f"⚠️ No se pudo cambiar a binario: {e}")
+        force_binary_type(ftp_client)
         
         # Descargar archivo
         result = client.cmd_RETR(ftp_client, remote_filename, local_path)
@@ -776,16 +769,7 @@ def download_directory_recursive(ftp_client, remote_dir, local_base_path):
         log_message(f"🔍 Iniciando descarga de: {remote_dir} desde {original_dir}")
         
         # FORZAR TIPO BINARIO al inicio de la descarga recursiva
-        try:
-            binary_response = client.generic_command_by_type(ftp_client, "I", command="TYPE", command_type='A')
-            log_message(f"🔧 Cambiando a tipo binario: {binary_response}")
-
-            # 🔥 Sincronizar estado
-            st.session_state.transfer_type = 'I'
-            client.TYPE = 'I'
-
-        except Exception as e:
-            log_message(f"⚠️ No se pudo cambiar a binario: {e}")
+        force_binary_type(ftp_client)
         
         # Cambiar al directorio remoto
         success, message = change_dir(ftp_client, remote_dir)
@@ -1281,6 +1265,8 @@ def handle_directory_navigation(target):
 # --- OTRAS FUNCIONES AUXILIARES ---
 
 def force_binary_type(ftp_client):
+    """Fuerza el tipo binario solo si force_binary está activado"""
+    if st.session_state.force_binary:
         try:
             binary_response = client.generic_command_by_type(ftp_client, "I", command="TYPE", command_type='A')
             log_message(f"🔧 Cambiando a tipo binario: {binary_response}")
@@ -1288,6 +1274,8 @@ def force_binary_type(ftp_client):
             client.TYPE = 'I'
         except Exception as e:
             log_message(f"⚠️ No se pudo cambiar a binario: {e}")
+    else:
+        log_message("ℹ️ Modo binario forzado desactivado, usando tipo actual")
 
 # -----------------------------------------------------------------------------------------------------
 # Barra lateral
@@ -1387,6 +1375,15 @@ if st.session_state.ftp_client:
                 st.sidebar.error(message)
             request_rerun()
     
+    # Agregar el checkbox para forzar modo binario
+    force_binary = st.sidebar.checkbox(
+        "Forzar modo binario", 
+        value=st.session_state.force_binary,
+        key="force_binary_checkbox",
+        help="Cuando está activado, todas las transferencias se realizarán en modo binario"
+    )
+    st.session_state.force_binary = force_binary
+    
     # Mostrar estado actual
     st.sidebar.caption(f"Modo: {current_mode} | Tipo: {current_type}")
 
@@ -1438,25 +1435,6 @@ st.sidebar.caption("Desarrollado por Adrian Hernández Castellanos y Laura Marti
 if st.session_state.ftp_client:
 
     st.title("Gestión FTP")
-    
-    if st.sidebar.button("Desconectar"):
-        if st.session_state.ftp_client:
-            try:
-                client.generic_command_by_type(st.session_state.ftp_client, command="QUIT", command_type='B')
-            except:
-                pass
-            try:
-                st.session_state.ftp_client.close()
-            except:
-                pass
-        # limpieza adicional para sockets de datos persistentes
-        try:
-            client.cleanup_data_socket()
-        except Exception:
-            pass
-
-        st.session_state.ftp_client = None
-        request_rerun()
 
     # Obtener directorio actual
     try:
