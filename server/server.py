@@ -114,15 +114,22 @@ def safe_path(session, path):
     Devuelve la ruta normalizada dentro del root del session.
     Lanza PermissionError si la ruta sale del root.
     """
-    if os.path.isabs(path):
-        candidate = os.path.normpath(path)
+    # Si el path es absoluto (comienza con /), lo interpretamos como relativo al root del usuario
+    if path.startswith('/'):
+        # Remover el slash inicial y tratarlo como ruta relativa al root_dir
+        relative_path = path[1:]
+        candidate = os.path.normpath(os.path.join(session.root_dir, relative_path))
     else:
         candidate = os.path.normpath(os.path.join(session.current_dir, path))
+    
     # Obtener rutas absolutas
     candidate_abs = os.path.abspath(candidate)
     root_abs = os.path.abspath(session.root_dir)
+    
+    # Verificar que la ruta esté dentro del root del usuario
     if not candidate_abs.startswith(root_abs):
         raise PermissionError("Access outside of user root")
+    
     return candidate_abs
             
 def get_advertised_ip_for_session(comm_socket):
