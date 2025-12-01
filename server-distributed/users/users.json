@@ -1,0 +1,17 @@
+{
+  "user": {
+    "password": "pbkdf2_sha256$260000$abcdef..."
+  },
+  "user2": {
+    "password": "pbkdf2_sha256$260000$123456..."
+  },
+  "adrian": {
+    "password": "pbkdf2_sha256$260000$aaab68d1652ab5fec386c8e6829e673a$1848b931459d27eee03bf099665d3639f4fe6bccfb536b77d01d5e216cf1eec5"
+  },
+  "laura": {
+    "password": "pbkdf2_sha256$260000$4493e805af41b6b5a4b4fc244d998851$5bd3b71af233ba9a0c82eee2498aa606e7fbfc6573747c5915c60737166ba12d"
+  },
+  "ariel": {
+    "password": "pbkdf2_sha256$260000$747bda96668822abfe0ec2b15edca8aa$2d98bc41d32f438aa23c73fe269a79808073b128e426e8e516f1921f142ba150"
+  }
+}
