@@ -1,41 +1,140 @@
 version: '3.8'
 
 services:
-  ftp-server:
-    build: ./server
-    container_name: ftp-server
-    ports:
-      - "21:21"
-      - "21000-21100:21000-21100"
+  # --- NODO 1 ---
+  ftp_node_1:
+    image: testing
+    container_name: ftp_node_1
+    command: python -u /app/server/server.py
     volumes:
-      - ./server:/app        # 🔥 monta todo el código del servidor
-      - ./server/data:/server
-    environment:
-      - FTP_ROOT=/server
-      - FTP_PASV_PORTS=21000-21100
-      - FTP_PASV_MIN_PORT=21000
-      - FTP_PASV_MAX_PORT=21100
+      - ./server:/app/server
+      - ./storage_node_1:/app/server/data
     networks:
-      - ftp-network
-    command: python /app/server.py   # 🔥 asegura que use tu código montado
+      shared-net:
+        aliases:
+          - ftp_cluster
+    ports:
+      - "2121:21"
+      - "2221:2122"
+      - "21000-21005:21000-21005"
+    environment: &env-defaults
+      FTP_ROOT: /app/server/data
+      NODE_ID: "1"
+      CLUSTER_ALIAS: ftp_cluster
+      FTP_PASV_MIN_PORT: "21000"
+      FTP_PASV_MAX_PORT: "21005"
 
-  ftp-client:
-    build: ./client
-    container_name: ftp-client
+  # --- NODO 2 ---
+  ftp_node_2:
+    image: testing
+    container_name: ftp_node_2
+    command: python -u /app/server/server.py
+    volumes:
+      - ./server:/app/server
+      - ./storage_node_2:/app/server/data
+    networks:
+      shared-net:
+        aliases:
+          - ftp_cluster
+    ports:
+      - "2122:21"
+      - "2222:2122"
+      - "21010-21015:21000-21005"
+    environment:
+      <<: *env-defaults
+      NODE_ID: "2"
+
+  # --- NODO 3 ---
+  ftp_node_3:
+    image: testing
+    container_name: ftp_node_3
+    command: python -u /app/server/server.py
+    volumes:
+      - ./server:/app/server
+      - ./storage_node_3:/app/server/data
+    networks:
+      shared-net:
+        aliases:
+          - ftp_cluster
+    ports:
+      - "2123:21"
+      - "2223:2122"
+      - "21020-21025:21000-21005"
+    environment:
+      <<: *env-defaults
+      NODE_ID: "3"
+
+  # --- NODO 4 ---
+  ftp_node_4:
+    image: testing
+    container_name: ftp_node_4
+    command: python -u /app/server/server.py
+    volumes:
+      - ./server:/app/server
+      - ./storage_node_4:/app/server/data
+    networks:
+      shared-net:
+        aliases:
+          - ftp_cluster
+    ports:
+      - "2124:21"
+      - "2224:2122"
+      - "21030-21035:21000-21005"
+    environment:
+      <<: *env-defaults
+      NODE_ID: "4"
+
+  # --- NODO 5 ---
+  ftp_node_5:
+    image: testing
+    container_name: ftp_node_5
+    command: python -u /app/server/server.py
+    volumes:
+      - ./server:/app/server
+      - ./storage_node_5:/app/server/data
+    networks:
+      shared-net:
+        aliases:
+          - ftp_cluster
+    ports:
+      - "2125:21"
+      - "2225:2122"
+      - "21040-21045:21000-21005"
+    environment:
+      <<: *env-defaults
+      NODE_ID: "5"
+
+  # --- CLIENTE STREAMLIT ---
+  client_1:
+    image: testing
+    container_name: client_node_1
+    command: streamlit run /app/client/app.py --server.port=8501 --server.address=0.0.0.0
+    volumes:
+      - ./client:/app/client
+      - ./client/downloads_1:/downloads
+    networks:
+      shared-net:
     ports:
       - "8501:8501"
-    volumes:
-      - ./client:/app          # 🔥 monta todo el código del cliente
-      - ./client/downloads:/app/downloads
-    depends_on:
-      - ftp-server
     environment:
-      - FTP_SERVER=ftp-server
-      - FTP_PORT=21
+      FTP_SERVER: ftp_node_1
+      FTP_PORT: "21"
+
+  client_2:
+    image: testing
+    container_name: client_node_2
+    command: streamlit run /app/client/app.py --server.port=8502 --server.address=0.0.0.0
+    volumes:
+      - ./client:/app/client
+      - ./client/downloads_2:/downloads
     networks:
-      - ftp-network
-    command: streamlit run /app/app.py --server.port=8501 --server.address=0.0.0.0
+      shared-net:
+    ports:
+      - "8502:8502"
+    environment:
+      FTP_SERVER: ftp_node_1
+      FTP_PORT: "21"
 
 networks:
-  ftp-network:
+  shared-net:
     driver: bridge
