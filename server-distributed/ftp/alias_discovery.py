@@ -67,4 +67,30 @@ class AliasServiceDiscovery:
         thread.start()
         return thread
         
+    def discover_via_alias(self):
+        """Descubre todos los contenedores con el alias ftp_cluster usando DNS de Docker"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                ips = socket.gethostbyname_ex(self.cluster_alias)[2]
+                # Filtrar IPs vacías o inválidas
+                valid_ips = [ip for ip in ips if ip and ip != '127.0.0.1']
+                return set(valid_ips)
+            
+            except socket.gaierror as e:
+                if "Name or service not known" not in str(e):
+                    print(f"[ALIAS-DISCOVERY] Error resolviendo alias '{self.cluster_alias}' (intento {attempt + 1}/{max_retries}): {e}")
+                if attempt == max_retries - 1:
+                    return set()
+            except Exception as e:
+                print(f"[ALIAS-DISCOVERY] Error inesperado resolviendo alias (intento {attempt + 1}/{max_retries}): {e}")
+                if attempt == max_retries - 1:
+                    return set()
+            
+            # Esperar antes de reintentar
+            if attempt < max_retries - 1:
+                time.sleep(2)
+        
+        return set()
+
 
