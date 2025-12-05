@@ -87,3 +87,175 @@ class StateManager:
         except: 
             pass
 
+    # --- CARGA DE OPERACIONES ---
+
+    def append_operation(self, op_type: str, path: str, metadata: Dict = None) -> LogEntry:
+        with self.lock:
+            entry = LogEntry(len(self.op_log), op_type, path, time.time(), metadata)
+            self.op_log.append(entry)
+            self.save_state()
+            self._apply_entry_locally(entry)
+            return entry
+
+    # --- MANEJO DE ENTRADAS DEL LOG ---
+
+    def _apply_entry_locally(self, entry: LogEntry):
+        path = entry.path
+        if entry.op_type == OP_MKD:
+            if path not in self.file_map:
+                self.file_map[path] = {'type': 'dir', 'replicas': []}
+        elif entry.op_type == OP_RMD:
+            if path in self.file_map:
+                del self.file_map[path]
+        elif entry.op_type == OP_REPAIR:
+            metadata = entry.metadata
+            if path in self.file_map and 'new_replicas' in metadata:
+                self.file_map[path]['replicas'] = metadata['new_replicas']
+        elif entry.op_type == 'RN':
+            metadata = entry.metadata
+            old_path = metadata.get('old_path')
+            new_path = entry.path
+            
+            if old_path in self.file_map:
+                self.file_map[new_path] = self.file_map[old_path]
+                del self.file_map[old_path]
+                
+                if self.file_map[new_path].get('type') == 'dir':
+                    old_prefix = old_path.rstrip('/') + '/'
+                    new_prefix = new_path.rstrip('/') + '/'
+                    
+                    keys_to_update = [k for k in self.file_map.keys() 
+                                    if k.startswith(old_prefix)]
+                    
+                    for old_key in keys_to_update:
+                        relative_part = old_key[len(old_prefix):]
+                        new_key = new_prefix + relative_part
+                        
+                        if old_key in self.file_map:
+                            self.file_map[new_key] = self.file_map[old_key]
+                            del self.file_map[old_key]
+
+    # --- RECONSTRUCCION DE ESQUEMA GLOBAL ---
+
+    def merge_external_logs(self, all_logs_with_ips: List[Dict]):
+        with self.lock:
+            print("[STATE] Reconstruyendo esquema global a partir de logs distribuidos...")
+            
+            temp_timeline = []
+            
+            for node_data in all_logs_with_ips:
+                node_ip = node_data['node_ip']
+                raw_log = node_data['log']
+                for raw_entry in raw_log:
+                    entry = LogEntry.from_dict(raw_entry)
+                    entry.origin_node_ip = node_ip
+                    temp_timeline.append(entry)
+            
+            temp_timeline.sort(key=lambda x: x.timestamp)
+            
+            self.file_map.clear()
+            
+            # Track de renombrados de directorios para actualizar rutas hijas
+            dir_renames = []  # Lista de (old_path, new_path, timestamp)
+            
+            for entry in temp_timeline:
+                path = entry.path
+                origin = entry.origin_node_ip
+                metadata = entry.metadata
+                
+                if entry.op_type == OP_MKD:
+                    if path not in self.file_map:
+                        self.file_map[path] = {
+                            'type': 'dir',
+                            'mtime': entry.timestamp,
+                            'replicas': set()
+                        }
+                    self.file_map[path]['replicas'].add(origin)
+                    
+                elif entry.op_type == OP_RMD:
+                    if path in self.file_map:
+                        del self.file_map[path]
+                    to_delete = [p for p in self.file_map.keys() if p.startswith(path + '/')]
+                    for p in to_delete:
+                        del self.file_map[p]
+                        
+                elif entry.op_type == OP_STOR:
+                    # MEJORADO: Aplicar renombrados de directorios anteriores
+                    actual_path = path
+                    for old_dir, new_dir, rename_ts in dir_renames:
+                        if entry.timestamp > rename_ts and path.startswith(old_dir.rstrip('/') + '/'):
+                            # Este archivo está en un directorio que fue renombrado
+                            rel_path = path[len(old_dir.rstrip('/') + '/'):]
+                            actual_path = os.path.join(new_dir, rel_path).replace('\\', '/')
+                            print(f"[MERGE] Aplicando renombrado de directorio: {path} -> {actual_path}")
+                            break
+                    
+                    self.file_map[actual_path] = {
+                        'type': 'file',
+                        'mtime': entry.timestamp,
+                        'size': metadata.get('size', 0),
+                        'hash': metadata.get('hash', ''),
+                        'replicas': set(metadata.get('replicas', [])),
+                        'created_by': metadata.get('created_by', 'unknown')
+                    }
+                    self.file_map[actual_path]['replicas'].add(origin)
+                    
+                elif entry.op_type == OP_DELE:
+                    if path in self.file_map:
+                        del self.file_map[path]
+                        
+                elif entry.op_type == OP_RN:
+                    old_path = metadata.get('old_path')
+                    if old_path and old_path in self.file_map:
+                        item_type = self.file_map[old_path].get('type', 'file')
+                        
+                        # Mover la entrada principal
+                        self.file_map[path] = self.file_map[old_path]
+                        self.file_map[path]['mtime'] = entry.timestamp
+                        del self.file_map[old_path]
+                        
+                        # Si es un directorio, registrar el renombrado y actualizar todos los hijos
+                        if item_type == 'dir':
+                            dir_renames.append((old_path, path, entry.timestamp))
+                            
+                            old_prefix = old_path.rstrip('/') + '/'
+                            new_prefix = path.rstrip('/') + '/'
+                            
+                            # Recolectar todas las rutas que necesitan actualizarse
+                            keys_to_update = []
+                            for key in list(self.file_map.keys()):
+                                if key.startswith(old_prefix):
+                                    keys_to_update.append(key)
+                            
+                            # Actualizar cada ruta
+                            for old_key in keys_to_update:
+                                relative_part = old_key[len(old_prefix):]
+                                new_key = new_prefix + relative_part
+                                
+                                self.file_map[new_key] = self.file_map[old_key]
+                                self.file_map[new_key]['mtime'] = entry.timestamp
+                                del self.file_map[old_key]
+                                
+                                print(f"[MERGE] Renombrado de hijo: {old_key} -> {new_key}")
+                    
+                    # Asegurar que el origen se registre como réplica
+                    if path in self.file_map:
+                        self.file_map[path]['replicas'].add(origin)
+            
+            # Asegurar que el directorio root esté siempre en el esquema global
+            root_path = '/app/server/data/root'
+            if root_path not in self.file_map:
+                self.file_map[root_path] = {
+                    'type': 'dir',
+                    'mtime': time.time(),
+                    'replicas': set()
+                }
+                print(f"[STATE] Directorio root agregado al esquema global: {root_path}")
+            
+            # Convertir sets a listas
+            for info in self.file_map.values():
+                if 'replicas' in info and isinstance(info['replicas'], set):
+                    info['replicas'] = list(info['replicas'])
+            
+            print(f"[STATE] Reconstrucción completada. {len(self.file_map)} objetos en el sistema.")
+            print(f"[STATE] Se procesaron {len(dir_renames)} renombrados de directorios")
