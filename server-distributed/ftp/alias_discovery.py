@@ -93,4 +93,18 @@ class AliasServiceDiscovery:
         
         return set()
 
+    def set_ips_change_callback(self, callback):
+        """Establece un callback para cuando cambien las IPs"""
+        self.ips_change_callback = callback
+        
+    def get_cluster_ips(self):
+        """Retorna todas las IPs del cluster descubiertas"""
+        with self.lock:
+            return list(self.discovered_ips)
+    
+    def get_cluster_size(self):
+        """Retorna el número de nodos en el cluster"""
+        with self.lock:
+            return len(self.discovered_ips)
+
 
