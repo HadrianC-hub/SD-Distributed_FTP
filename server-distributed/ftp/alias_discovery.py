@@ -107,4 +107,21 @@ class AliasServiceDiscovery:
         with self.lock:
             return len(self.discovered_ips)
 
+    def _resolve_dns(self, name):
+        try:
+            return set(
+                ip for ip in socket.gethostbyname_ex(name)[2]
+                if ip and ip != "127.0.0.1"
+            )
+        except socket.gaierror:
+            return set()
 
+# Singleton global
+_alias_discovery_instance = None
+def start_alias_discovery(cluster_alias=None):
+    """Inicia el descubrimiento por alias y retorna la instancia"""
+    global _alias_discovery_instance
+    if _alias_discovery_instance is None:
+        _alias_discovery_instance = AliasServiceDiscovery(cluster_alias)
+        _alias_discovery_instance.start_continuous_discovery(interval=15)
+    return _alias_discovery_instance
