@@ -301,3 +301,180 @@ class StateManager:
         
         return local_files
 
+    def analyze_node_state(self, node_logs: List[Dict], node_ip: str, 
+                      disk_scan: Dict[str, Dict] = None,
+                      safe_mode: bool = True) -> Dict:
+
+        with self.lock:
+            # 1. Reconstruir estado desde el log del nodo
+            node_state_from_log = {}
+            sorted_logs = sorted(node_logs, key=lambda x: x.get('timestamp', 0))
+            
+            # Track de renombrados para detectar rutas obsoletas
+            rename_history = []
+            
+            for entry_data in sorted_logs:
+                entry = LogEntry.from_dict(entry_data)
+                if entry.op_type == 'STOR':
+                    node_state_from_log[entry.path] = {'type': 'file', 'ts': entry.timestamp}
+                elif entry.op_type == 'MKD':
+                    node_state_from_log[entry.path] = {'type': 'dir', 'ts': entry.timestamp}
+                elif entry.op_type in ['DELE', 'RMD']:
+                    keys_to_remove = [k for k in node_state_from_log 
+                                    if k == entry.path or k.startswith(entry.path + '/')]
+                    for k in keys_to_remove: 
+                        node_state_from_log.pop(k, None)
+                elif entry.op_type == 'RN':
+                    old = entry.metadata.get('old_path')
+                    if old in node_state_from_log:
+                        node_state_from_log[entry.path] = node_state_from_log[old]
+                        del node_state_from_log[old]
+                    rename_history.append((old, entry.path, entry.timestamp))
+
+            # 2. Si tenemos escaneo de disco, usar ESE como fuente de verdad
+            node_state = disk_scan if disk_scan else node_state_from_log
+            
+            inconsistencies = []
+            zombies_found = 0
+            
+            print(f"[ANALYZE] Analizando nodo {node_ip} con {len(node_state)} elementos en disco")
+            
+            # Definir rutas críticas
+            server_root = os.environ.get('SERVER_ROOT', '/app/server/data')
+            users_root = os.path.join(server_root, 'root')
+            
+            # 3. DETECCIÓN DE ZOMBIES
+            for path, info in node_state.items():
+                global_info = self.file_map.get(path)
+                
+                # --- PROTECCIÓN CRÍTICA DE DIRECTORIOS ---
+                is_system_root = (path == users_root or path.endswith('/root'))
+                
+                # Verificar si es un directorio de usuario (hijo directo de root)
+                # Ejemplo: /app/server/data/root/adrian -> dirname es .../root
+                is_user_home = False
+                if not is_system_root:
+                    parent_dir = os.path.dirname(path)
+                    # Normalizamos para evitar problemas con slashes finales
+                    if os.path.normpath(parent_dir) == os.path.normpath(users_root):
+                        is_user_home = True
+
+                if is_system_root or is_user_home:
+                    # Si no está en el esquema global, LO AGREGAMOS en lugar de borrarlo
+                    if not global_info:
+                        print(f"[ANALYZE] Directorio protegido detectado en disco pero no en memoria: {path}")
+                        self.file_map[path] = {
+                            'type': 'dir',
+                            'mtime': info.get('mtime', time.time()),
+                            'replicas': [node_ip],
+                            'created_by': 'system_recovery'
+                        }
+                        print(f"[ANALYZE] {path} reintegrado al esquema global automáticamente.")
+                    else:
+                        # Asegurar que el nodo esté en la lista de réplicas
+                        if node_ip not in global_info.get('replicas', []):
+                            global_info['replicas'].append(node_ip)
+                    
+                    # Saltamos cualquier lógica de borrado para estas carpetas
+                    continue
+                # -----------------------------------------
+                
+                # Caso 1: No existe en el esquema global (Y no es protegido)
+                if not global_info:
+                    inconsistencies.append({
+                        'command': 'DELETE_DIR_RECURSIVE' if info['type'] == 'dir' else 'DELETE_FILE',
+                        'path': path,
+                        'reason': 'zombie_not_in_global_state',
+                        'priority': 1
+                    })
+                    zombies_found += 1
+                    print(f"[ANALYZE] Zombie detectado: {path} (no en esquema global)")
+                    continue
+                
+                # Caso 2: Es archivo y el nodo NO es réplica
+                if info['type'] == 'file':
+                    replicas = global_info.get('replicas', [])
+                    if node_ip not in replicas:
+                        inconsistencies.append({
+                            'command': 'DELETE_FILE',
+                            'path': path,
+                            'reason': 'zombie_replica_relocated',
+                            'was_moved_to': replicas,
+                            'priority': 1
+                        })
+                        zombies_found += 1
+                        print(f"[ANALYZE] Zombie detectado: {path} (no es réplica)")
+
+            # 4. DETECCIÓN DE FALTANTES (lógica sin cambios...)
+            for path, global_info in self.file_map.items():
+                if global_info.get('type') == 'file':
+                    replicas = global_info.get('replicas', [])
+                    
+                    if node_ip in replicas:
+                        if path not in node_state:
+                            inconsistencies.append({
+                                'command': 'CREATE_FILE',
+                                'path': path,
+                                'replicas': replicas,
+                                'size': global_info.get('size', 0),
+                                'hash': global_info.get('hash', ''),
+                                'reason': 'missing_replica',
+                                'priority': 2
+                            })
+                        else:
+                            node_mtime = node_state[path].get('mtime', 0)
+                            global_mtime = global_info.get('mtime', 0)
+                            
+                            if global_mtime > node_mtime + 5:
+                                inconsistencies.append({
+                                    'command': 'UPDATE_FILE',
+                                    'path': path,
+                                    'replicas': replicas,
+                                    'size': global_info.get('size', 0),
+                                    'hash': global_info.get('hash', ''),
+                                    'reason': 'outdated_version',
+                                    'global_mtime': global_mtime,
+                                    'node_mtime': node_mtime,
+                                    'priority': 3
+                                })
+
+            inconsistencies.sort(key=lambda x: x.get('priority', 99))
+
+            return {
+                'has_inconsistencies': len(inconsistencies) > 0,
+                'inconsistencies': inconsistencies,
+                'node_state_summary': {
+                    'items_count': len(node_state),
+                    'zombies_found': zombies_found,
+                    'used_disk_scan': disk_scan is not None
+                }
+            }
+
+    def get_full_log_as_dict(self):
+        with self.lock:
+            return [e.to_dict() for e in self.op_log]
+
+    def get_file_info(self, path):
+        with self.lock:
+            return self.file_map.get(path)
+
+    def ensure_user_directory(self, user_root: str):
+        with self.lock:
+            if user_root not in self.file_map:
+                self.file_map[user_root] = {
+                    'type': 'dir',
+                    'mtime': time.time(),
+                    'created_by': self.node_id,
+                    'replicas': []
+                }
+                print(f"[STATE] Directorio de usuario creado en estado global: {user_root}")
+
+# Singleton Global
+_state_manager_instance = None
+def get_state_manager(node_id=None):
+    global _state_manager_instance
+    if _state_manager_instance is None:
+        if not node_id: 
+            node_id = os.environ.get('NODE_ID', 'unknown')
+        _state_manager_instance = StateManager(node_id)
+    return _state_manager_instance
