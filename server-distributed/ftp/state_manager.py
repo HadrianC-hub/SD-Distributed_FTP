@@ -259,3 +259,45 @@ class StateManager:
             
             print(f"[STATE] Reconstrucción completada. {len(self.file_map)} objetos en el sistema.")
             print(f"[STATE] Se procesaron {len(dir_renames)} renombrados de directorios")
+
+    # --- LLAMADAS EXTERNAS Y UTILIDADES ---
+
+    def scan_local_filesystem(self, root_dir: str) -> Dict[str, Dict]:
+        """
+        Escanea el sistema de archivos local y devuelve un mapa de todos los archivos y directorios que existen físicamente.
+        """
+        local_files = {}
+        
+        try:
+            for dirpath, dirnames, filenames in os.walk(root_dir):
+                # Registrar directorio
+                if dirpath != root_dir:
+                    local_files[dirpath] = {
+                        'type': 'dir',
+                        'mtime': os.path.getmtime(dirpath),
+                        'exists_on_disk': True
+                    }
+                
+                # Registrar archivos
+                for filename in filenames:
+                    # Ignorar archivos temporales del sistema
+                    if filename.endswith('.tmp') or '.delta.' in filename:
+                        continue
+                        
+                    filepath = os.path.join(dirpath, filename)
+                    try:
+                        stat = os.stat(filepath)
+                        local_files[filepath] = {
+                            'type': 'file',
+                            'size': stat.st_size,
+                            'mtime': stat.st_mtime,
+                            'exists_on_disk': True
+                        }
+                    except Exception as e:
+                        print(f"[SCAN] Error al leer {filepath}: {e}")
+                        
+        except Exception as e:
+            print(f"[SCAN] Error escaneando {root_dir}: {e}")
+        
+        return local_files
+
