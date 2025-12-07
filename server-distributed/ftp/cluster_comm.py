@@ -121,3 +121,49 @@ class ClusterCommunication:
                 client_socket.close()
             except:
                 pass
+
+    def process_message(self, message: Dict, client_socket):
+        """Procesa un mensaje recibido y ejecuta el handler correspondiente"""
+        msg_type = message.get('type')
+        handler = self.message_handlers.get(msg_type)
+        
+        if handler:
+            try:
+                response = handler(message)
+                if response:
+                    payload = json.dumps(response).encode()
+                    try:
+                        print(f"[CLUSTER] Enviando respuesta a cliente: {response.get('status','?')} ({len(payload)} bytes)")
+                    except Exception:
+                        pass
+                    client_socket.send(payload)
+                    # Señalizar EOF al cliente para aumentar probabilidad de entrega inmediata
+                    try:
+                        client_socket.shutdown(socket.SHUT_WR)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[CLUSTER] Error en handler para {msg_type}: {e}")
+                client_socket.send(json.dumps({'status': 'error', 'message': str(e)}).encode())
+        else:
+            print(f"[CLUSTER] No hay handler para el tipo de mensaje: {msg_type}")
+
+    def update_cluster_ips(self, new_ips: List[str]):
+        """Actualiza la lista de IPs del cluster"""
+        # No filtrar la IP local - el hashing consistente necesita todas las IPs
+        old_ips = set(self.cluster_ips)
+        new_ips_set = set(new_ips)
+        
+        added_ips = new_ips_set - old_ips
+        removed_ips = old_ips - new_ips_set
+        
+        self.cluster_ips = new_ips
+        
+        if added_ips:
+            print(f"[CLUSTER] Nodos añadidos: {added_ips}")
+        if removed_ips:
+            print(f"[CLUSTER] Nodos removidos: {removed_ips}")
+
+        # Si hay cambios significativos, loggear el estado completo
+        if added_ips or removed_ips:
+            print(f"[CLUSTER] Estado actual del cluster: {len(self.cluster_ips)} nodos -> {sorted(self.cluster_ips)}")
