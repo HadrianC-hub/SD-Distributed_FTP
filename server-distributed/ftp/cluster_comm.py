@@ -174,3 +174,172 @@ class ClusterCommunication:
         """Registra un handler para un tipo de mensaje específico"""
         self.message_handlers[msg_type] = handler
 
+    # --- ENVIO DE MENSAJES ---
+
+    def send_message(self, target_ip: str, message: Dict, expect_response: bool = True) -> Dict:
+        """Envía un mensaje a un nodo específico con mejor manejo de JSON"""
+        
+        # NO enviar mensajes a sí mismo
+        if target_ip == self.local_ip:
+            return {'status': 'skipped', 'message': 'Self-send avoided'}
+            
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(15)  # Timeout más conservador
+                
+                # Serializar el mensaje ANTES de conectar
+                try:
+                    message_str = json.dumps(message, separators=(',', ':'))  # Compact JSON
+                    message_bytes = message_str.encode()
+                except Exception as e:
+                    print(f"[CLUSTER] Error serializando mensaje: {e}")
+                    return {'status': 'error', 'message': f'Serialization error: {str(e)}'}
+                
+                sock.connect((target_ip, 2123))
+                print(f"[CLUSTER] Conectado a {target_ip}:2123 (intento {attempt + 1}/{max_retries})")
+
+                # Enviar mensaje completo
+                sent = sock.sendall(message_bytes)
+                print(f"[CLUSTER] Enviado {len(message_bytes)} bytes a {target_ip}")
+                
+                if expect_response:
+                    # Recibir respuesta
+                    response_data = b""
+                    sock.settimeout(15.0)
+                    
+                    while True:
+                        try:
+                            chunk = sock.recv(4096)
+                            if not chunk:
+                                break
+                            response_data += chunk
+                            
+                            # Intentar parsear para ver si tenemos respuesta completa
+                            try:
+                                response = json.loads(response_data.decode())
+                                break
+                            except json.JSONDecodeError:
+                                continue
+                        except socket.timeout:
+                            # No más datos por ahora, salir y revisar lo acumulado
+                            print(f"[CLUSTER] Timeout recibiendo respuesta de {target_ip} (intentando parsear lo acumulado)")
+                            break
+                    
+                    sock.close()
+
+                    if response_data:
+                        try:
+                            return json.loads(response_data.decode())
+                        except json.JSONDecodeError as e:
+                            # Intento de recuperación: extraer objeto JSON al inicio
+                            try:
+                                
+                                dec = JSONDecoder()
+                                obj, idx = dec.raw_decode(response_data.decode(errors='ignore'))
+                                print(f"[CLUSTER] Partial/extra data decodificada usada para respuesta desde {target_ip}")
+                                return obj
+                            except Exception:
+                                print(f"[CLUSTER] Error decodificando respuesta de {target_ip}: {e} -- raw: {response_data[:200]!r}")
+                                return {'status': 'error', 'message': f'Invalid JSON response: {str(e)}'}
+                    else:
+                        # Intento de recuperación: hacer un pequeño bloqueo y reintentar recibir
+                        try:
+                            print(f"[CLUSTER] No se recibieron bytes desde {target_ip}, esperando 0.5s por si llega algo...")
+                            sock.settimeout(0.5)
+                            extra = b""
+                            try:
+                                extra = sock.recv(8192)
+                            except socket.timeout:
+                                extra = b""
+                            if extra:
+                                response_data = extra
+                                try:
+                                    return json.loads(response_data.decode())
+                                except json.JSONDecodeError as e:
+                                    print(f"[CLUSTER] Error decodificando respuesta tardía de {target_ip}: {e} -- raw: {response_data[:200]!r}")
+                                    return {'status': 'error', 'message': f'Invalid JSON response (late): {str(e)}'}
+                            else:
+                                print(f"[CLUSTER] No se recibieron bytes desde {target_ip} (respuesta vacía tras reintento)")
+                                return {'status': 'timeout', 'message': 'No response received'}
+                        except Exception as e:
+                            print(f"[CLUSTER] Error intentando re-lectura desde {target_ip}: {e}")
+                            return {'status': 'timeout', 'message': 'No response received'}
+                else:
+                    sock.close()
+                    return {'status': 'sent'}
+                    
+            except socket.timeout:
+                print(f"[CLUSTER] Timeout enviando mensaje a {target_ip} (intento {attempt + 1}/{max_retries})")
+                if attempt == max_retries - 1:
+                    return {'status': 'timeout', 'message': f'Timeout after {max_retries} attempts'}
+            except ConnectionRefusedError:
+                print(f"[CLUSTER] Conexión rechazada por {target_ip} (intento {attempt + 1}/{max_retries})")
+                if attempt == max_retries - 1:
+                    return {'status': 'error', 'message': 'Connection refused'}
+            except Exception as e:
+                print(f"[CLUSTER] Error enviando mensaje a {target_ip} (intento {attempt + 1}/{max_retries}): {e}")
+                if attempt == max_retries - 1:
+                    return {'status': 'error', 'message': str(e)}
+            
+            # Esperar antes de reintentar
+            if attempt < max_retries - 1:
+                time.sleep(1)
+        
+        return {'status': 'error', 'message': 'Max retries exceeded'}
+    
+    def broadcast_message(self, message: Dict, expect_responses: bool = True) -> Dict[str, Dict]:
+        """Envía un mensaje a todos los nodos del cluster EXCEPTO a sí mismo"""
+        message['sender'] = self.node_id
+        message['sender_ip'] = self.local_ip
+        message['operation_id'] = str(uuid.uuid4())
+        message['timestamp'] = time.time()
+
+        responses = {}
+        # Enviar a todos los nodos en paralelo para evitar que uno lento bloquee al grupo
+        responses = {}
+
+        def _send(ip):
+            if ip != self.local_ip:
+                print(f"[CLUSTER] Enviando mensaje a {ip}")
+                resp = self.send_message(ip, message, expect_responses)
+                responses[ip] = resp
+            else:
+                responses[ip] = {'status': 'skipped', 'message': 'Self-send avoided'}
+
+        threads = []
+        for ip in self.cluster_ips:
+            t = threading.Thread(target=_send, args=(ip,), daemon=True)
+            threads.append(t)
+            t.start()
+
+        # Esperar a todos
+        for t in threads:
+            t.join()
+
+        # Reintentar rápidamente para nodos que reportaron timeout/errores transitorios
+        timed_out = [ip for ip, r in responses.items() if r is None or r.get('status') in ('timeout', 'error')]
+        if timed_out:
+            print(f"[CLUSTER] Reintentos para nodos con respuestas problemáticas: {timed_out}")
+            for ip in timed_out:
+                if ip == self.local_ip:
+                    continue
+                try:
+                    time.sleep(0.1)
+                    print(f"[CLUSTER] Reintentando mensaje a {ip} (retry)")
+                    responses[ip] = self.send_message(ip, message, expect_responses)
+                except Exception as e:
+                    print(f"[CLUSTER] Error en retry a {ip}: {e}")
+
+        return responses
+
+# Singleton global
+_cluster_comm_instance = None
+def start_cluster_communication(node_id: str, cluster_ips: List[str]):
+    """Inicia la comunicación del cluster y retorna la instancia"""
+    global _cluster_comm_instance
+    if _cluster_comm_instance is None:
+        _cluster_comm_instance = ClusterCommunication(node_id, cluster_ips)
+        threading.Thread(target=_cluster_comm_instance.start_server, daemon=True).start()
+    return _cluster_comm_instance
