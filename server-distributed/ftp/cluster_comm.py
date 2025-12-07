@@ -167,3 +167,10 @@ class ClusterCommunication:
         # Si hay cambios significativos, loggear el estado completo
         if added_ips or removed_ips:
             print(f"[CLUSTER] Estado actual del cluster: {len(self.cluster_ips)} nodos -> {sorted(self.cluster_ips)}")
+
+    # --- REGISTRO DE HANDLERS ---
+
+    def register_handler(self, msg_type: str, handler: Callable):
+        """Registra un handler para un tipo de mensaje específico"""
+        self.message_handlers[msg_type] = handler
+
