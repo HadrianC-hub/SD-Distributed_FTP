@@ -330,3 +330,62 @@ class NodeTransfer:
             except:
                 pass
 
+    # --- FUNCIONES AUXILIARES ---
+                
+    def request_file_from_node(self, target_ip: str, file_path: str, local_path: str = None) -> Tuple[bool, str, str]:
+        """Solicita un archivo a otro nodo con reintentos."""
+        max_retries = 3
+        if local_path is None: local_path = file_path
+        for attempt in range(max_retries):
+
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(15) # Timeout razonable
+                sock.connect((target_ip, self.NODE_DATA_PORT))
+                
+                # 1. Enviar Tipo PULL
+                sock.send(struct.pack("B", 1))
+                
+                # 2. Enviar path solicitado
+                encoded_path = file_path.encode()
+                sock.send(struct.pack(">I", len(encoded_path)))
+                sock.send(encoded_path)
+                
+                # 3. Recibir estado (1=OK, 0=Error)
+                response_data = sock.recv(4)
+                if len(response_data) < 4:
+                    sock.close()
+                    return False, local_path, "No response from target"
+                    
+                response = struct.unpack(">I", response_data)[0]
+                if response == 0:
+                    sock.close()
+                    return False, local_path, "File not found on target"
+                
+                # 4. Recibir el archivo (Usando el mismo protocolo que PUSH)
+                success, actual_path, msg = self.receive_file_from_node(sock, target_ip, local_path)
+                sock.close()
+                if success:
+                    return True, actual_path, msg
+                else:
+                    print(f"[NODE-TRANSFER] Intento {attempt + 1} falló para {file_path}: {msg}")
+                    if attempt < max_retries - 1:
+                        time.sleep(1)  # Esperar antes de reintentar
+                        
+            except Exception as e:
+                print(f"[NODE-TRANSFER] Error en intento {attempt + 1}: {e}")
+                if attempt == max_retries - 1:
+                    return False, local_path, str(e)
+        
+        return False, local_path, f"Failed after {max_retries} attempts"
+
+# Singleton
+_node_transfer_instance = None
+def get_node_transfer(local_ip: str = None):
+    global _node_transfer_instance
+    if _node_transfer_instance is None:
+        if not local_ip: local_ip = '127.0.0.1'
+        _node_transfer_instance = NodeTransfer(local_ip)
+        threading.Thread(target=_node_transfer_instance.start_server, daemon=True).start()
+    return _node_transfer_instance
+
