@@ -183,4 +183,86 @@ class NodeTransfer:
             
         except Exception as e:
             print(f"[NODE-TRANSFER] Error enviando archivo a {addr}: {e}")
- 
+    
+    def receive_file_from_node(self, sock, addr, target_path: str = None) -> Tuple[bool, str, str]:
+        """Recibe un archivo de otro nodo."""
+        try:
+            # Leer longitud del nombre (4 bytes)
+            filename_len_data = sock.recv(4)
+            if len(filename_len_data) < 4:
+                return False, "", "Connection closed (reading filename len)"
+            
+            filename_len = struct.unpack(">I", filename_len_data)[0]
+            
+            # Nombre del archivo
+            filename_data = sock.recv(filename_len)
+            if len(filename_data) < filename_len:
+                return False, "", "Connection closed (reading filename)"
+            filename = filename_data.decode()
+            
+            # Si target_path es None, usar el nombre recibido
+            save_path = target_path if target_path else filename
+            
+            # Leer tamaño (8 bytes)
+            file_size_data = b""
+            while len(file_size_data) < 8:
+                chunk = sock.recv(8 - len(file_size_data))
+                if not chunk: break
+                file_size_data += chunk
+            
+            if len(file_size_data) < 8:
+                return False, save_path, "Connection closed (reading size)"
+                
+            file_size = struct.unpack(">Q", file_size_data)[0]
+            
+            # Leer Hash (32 bytes)
+            expected_hash_data = b""
+            while len(expected_hash_data) < 32:
+                chunk = sock.recv(32 - len(expected_hash_data))
+                if not chunk: break
+                expected_hash_data += chunk
+                
+            if len(expected_hash_data) < 32:
+                return False, save_path, "Connection closed (reading hash)"
+                
+            expected_hash = expected_hash_data.decode()
+            
+            print(f"[NODE-TRANSFER] Recibiendo: {save_path}, Size: {file_size}")
+            
+            # Crear directorios
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            
+            # Recibir contenido
+            received_size = 0
+            hash_obj = hashlib.md5()
+            
+            with open(save_path, 'wb') as f:
+                while received_size < file_size:
+                    remaining = file_size - received_size
+                    chunk_size = min(self.BUFFER_SIZE, remaining)
+                    chunk = sock.recv(chunk_size)
+                    if not chunk: break
+                    
+                    f.write(chunk)
+                    hash_obj.update(chunk)
+                    received_size += len(chunk)
+            
+            if received_size != file_size:
+                return False, save_path, f"Size mismatch: {received_size} vs {file_size}"
+            
+            actual_hash = hash_obj.hexdigest()
+            if actual_hash != expected_hash:
+                return False, save_path, f"Hash mismatch: {actual_hash} vs {expected_hash}"
+            
+            # Enviar confirmación simple si es posible
+            try:
+                sock.send(b"OK")
+            except: pass
+            
+            return True, save_path, actual_hash
+            
+        except Exception as e:
+            print(f"[NODE-TRANSFER] Error receiving: {e}")
+            import traceback
+            traceback.print_exc()
+            return False, target_path, str(e)
