@@ -78,3 +78,109 @@ class NodeTransfer:
                 client_sock.close()
             except:
                 pass
+        
+    def send_file_to_node(self, sock, addr):
+        """Envía un archivo a otro nodo (Respuesta a PULL)."""
+        try:
+            # Leer longitud del nombre de archivo (4 bytes)
+            filename_len_data = sock.recv(4)
+            if len(filename_len_data) < 4:
+                return
+            
+            filename_len = struct.unpack(">I", filename_len_data)[0]
+            
+            # Leer nombre de archivo solicitado
+            filename_data = sock.recv(filename_len)
+            filename = filename_data.decode()
+            
+            # --- Buscar archivo en múltiples ubicaciones ---
+            file_found = False
+            file_to_send = filename
+            
+            # Intento 1: Ruta absoluta directa
+            if os.path.exists(filename):
+                file_found = True
+                file_to_send = filename
+            else:
+                # Intento 2: Extraer usuario de la ruta y buscar en su directorio
+                parts = filename.split('/')
+                
+                # Buscar el patrón '/root/' en la ruta
+                if 'root' in parts:
+                    root_index = parts.index('root')
+                    if root_index + 1 < len(parts):
+                        user = parts[root_index + 1]
+                        
+                        # Construir ruta base del usuario
+                        user_root = os.path.join(SERVER_ROOT, 'root', user)
+                        
+                        # Construir ruta relativa dentro del directorio del usuario
+                        rel_parts = parts[root_index + 2:]  # Todo después de 'root/<usuario>'
+                        
+                        if rel_parts:
+                            # Buscar recursivamente desde el directorio del usuario
+                            target_filename = rel_parts[-1]  # Nombre del archivo
+                            
+                            for root_dir, dirs, files in os.walk(user_root):
+                                if target_filename in files:
+                                    # Verificar si la ruta relativa coincide
+                                    rel_path_from_user = os.path.relpath(root_dir, user_root)
+                                    if rel_path_from_user == '.':
+                                        # El archivo está directamente en el directorio del usuario
+                                        if target_filename == rel_parts[0]:
+                                            file_to_send = os.path.join(root_dir, target_filename)
+                                            file_found = True
+                                            break
+                                    else:
+                                        # Verificar si la estructura de directorios coincide
+                                        expected_rel_dirs = '/'.join(rel_parts[:-1])
+                                        if expected_rel_dirs == rel_path_from_user.replace(os.sep, '/'):
+                                            file_to_send = os.path.join(root_dir, target_filename)
+                                            file_found = True
+                                            break
+            
+            if not file_found:
+                # Último intento: buscar por nombre de archivo en todo el árbol
+                target_filename = os.path.basename(filename)
+                for root_dir, dirs, files in os.walk(SERVER_ROOT):
+                    if target_filename in files:
+                        file_to_send = os.path.join(root_dir, target_filename)
+                        file_found = True
+                        break
+            
+            if not file_found:
+                print(f"[NODE-TRANSFER] Archivo no encontrado: {filename}")
+                sock.send(struct.pack(">I", 0))  # Enviar error (0)
+                return
+            
+            # Enviar confirmación (1)
+            sock.send(struct.pack(">I", 1))  # OK
+            encoded_filename = filename.encode()
+            sock.send(struct.pack(">I", len(encoded_filename)))
+            sock.send(encoded_filename)
+
+            # Obtener información del archivo
+            file_size = os.path.getsize(file_to_send)
+            file_hash = calculate_file_hash(file_to_send)
+            
+            # Enviar tamaño (8 bytes)
+            sock.send(struct.pack(">Q", file_size))
+            
+            # Enviar hash (32 bytes para MD5)
+            sock.send(file_hash.encode())
+            
+            # Enviar contenido del archivo
+            sent_bytes = 0
+            with open(file_to_send, 'rb') as f:
+                while True:
+                    chunk = f.read(self.BUFFER_SIZE)
+                    if not chunk:
+                        break
+                    sock.sendall(chunk)
+                    sent_bytes += len(chunk)
+            
+            print(f"[NODE-TRANSFER] Archivo {file_to_send} ({sent_bytes} bytes) enviado a {addr}")
+            
+        except Exception as e:
+            print(f"[NODE-TRANSFER] Error enviando archivo a {addr}: {e}")
+ 
