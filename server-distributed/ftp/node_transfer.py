@@ -266,3 +266,67 @@ class NodeTransfer:
             import traceback
             traceback.print_exc()
             return False, target_path, str(e)
+    
+    def handle_sync_command(self, sock, addr):
+        """Maneja comandos de sincronización."""
+        try:
+            # Leer comando (4 bytes de longitud)
+            cmd_len_data = sock.recv(4)
+            if len(cmd_len_data) < 4:
+                return
+            
+            cmd_len = struct.unpack(">I", cmd_len_data)[0]
+            
+            # Leer comando JSON
+            cmd_data = sock.recv(cmd_len)
+            if len(cmd_data) < cmd_len:
+                return
+            
+            command = json.loads(cmd_data.decode())
+            cmd_type = command.get('command')
+            
+            print(f"[NODE-TRANSFER] Comando de sincronización desde {addr}: {cmd_type}")
+            
+            if cmd_type == 'CREATE_DIR':
+                path = command.get('path')
+                os.makedirs(path, exist_ok=True)
+                sock.send(b"OK")
+                
+            elif cmd_type == 'DELETE_DIR':
+                path = command.get('path')
+                if os.path.exists(path) and os.path.isdir(path):
+                    if not os.listdir(path):
+                        os.rmdir(path)
+                        sock.send(b"OK")
+                    else:
+                        sock.send(b"DIR_NOT_EMPTY")
+                else:
+                    sock.send(b"NOT_FOUND")
+                    
+            elif cmd_type == 'DELETE_FILE':
+                path = command.get('path')
+                if os.path.exists(path) and os.path.isfile(path):
+                    os.remove(path)
+                    sock.send(b"OK")
+                else:
+                    sock.send(b"NOT_FOUND")
+                    
+            elif cmd_type == 'RENAME':
+                old_path = command.get('old_path')
+                new_path = command.get('new_path')
+                if os.path.exists(old_path):
+                    os.rename(old_path, new_path)
+                    sock.send(b"OK")
+                else:
+                    sock.send(b"NOT_FOUND")
+                    
+            else:
+                sock.send(b"UNKNOWN_COMMAND")
+                
+        except Exception as e:
+            print(f"[NODE-TRANSFER] Error manejando comando de sincronización: {e}")
+            try:
+                sock.send(b"ERROR")
+            except:
+                pass
+
