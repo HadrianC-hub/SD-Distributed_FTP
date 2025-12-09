@@ -460,3 +460,24 @@ class BullyElection:
                 ).start()
         
         print(f"[BULLY] COORDINATOR enviado a {len(target_ips)} nodos. Sincronización en handle_node_join.")
+
+    def _schedule_coordinator_timeout(self):
+        """Programa el timeout para esperar COORDINATOR"""
+        self._cancel_coordinator_timer()
+        self.coordinator_timer = threading.Timer(10.0, self._check_leader_timeout)
+        self.coordinator_timer.daemon = True
+        self.coordinator_timer.start()
+
+    def _check_leader_timeout(self):
+        """Si no llegó COORDINATOR en el tiempo, iniciar elección"""
+        with self.election_lock:
+            if not self.leader_ip and self.state == STATE_FOLLOWER:
+                print(f"[BULLY] Timeout esperando COORDINATOR. Iniciando elección.")
+                self.start_election()
+
+    def _cancel_coordinator_timer(self):
+        """Cancela el timer de espera de COORDINATOR"""
+        if self.coordinator_timer:
+            self.coordinator_timer.cancel()
+            self.coordinator_timer = None
+
