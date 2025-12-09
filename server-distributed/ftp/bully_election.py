@@ -284,3 +284,28 @@ class BullyElection:
             self._on_leadership_gained()
         
         threading.Thread(target=send_coordinator, daemon=True).start()
+
+    # --- MANEJO DE SINCRONIZACIÓN ---
+
+    def _on_leadership_gained(self):
+        """Acciones del líder tras ganar."""
+        if hasattr(self, '_leadership_gained_executed'):
+            return
+        self._leadership_gained_executed = True
+        
+        print("[LIDER] Iniciando reconstrucción del sistema de archivos...")
+        # Solo ejecutamos la reconstrucción inicial basada en logs (Critical)
+        threading.Thread(target=self._execute_log_sync, daemon=True).start()
+        
+        # CORRECCIÓN: Programar replicación forzada después de la reconstrucción
+        def schedule_forced_replication():
+            time.sleep(10)  # Esperar a que termine la reconstrucción
+            if self.state == STATE_LEADER:
+                from ftp.leader_operations import get_leader_operations
+                ops = get_leader_operations(self.cluster_comm, self)
+                if ops:
+                    print("[BULLY] Programando replicación forzada post-reconstrucción...")
+                    # Forzar replicación completa si hay 2 nodos
+                    ops.check_replication_status()
+        
+        threading.Thread(target=schedule_forced_replication, daemon=True).start()
