@@ -74,3 +74,41 @@ class BullyElection:
                 else:
                     print(f"[BULLY] No tengo líder. Esperando COORDINATOR...")
                     self._schedule_coordinator_timeout()
+
+    # --- HANDLERS DE MENSAJES ---
+
+    def handle_election_msg(self, message):
+        """Alguien me pregunta si estoy vivo"""
+        sender_ip = message.get('sender_ip')
+        sender_leader = message.get('current_leader')
+        
+        print(f"[BULLY] Recibí ELECTION de {sender_ip}")
+        
+        # Si ya soy líder, simplemente responder y reenviar COORDINATOR
+        if self.state == STATE_LEADER:
+            print(f"[BULLY] Soy líder. Reenviando COORDINATOR a {sender_ip}")
+            self._send_coordinator_to_ips([sender_ip])
+            return {
+                'status': 'alive', 
+                'responder_ip': self.local_ip, 
+                'is_leader': True,
+                'my_leader': self.local_ip
+            }
+        
+        # Si tengo un líder diferente al del remitente, hay conflicto
+        if self.leader_ip and sender_leader and self.leader_ip != sender_leader:
+            print(f"[BULLY] ¡CONFLICTO! Yo sigo a {self.leader_ip}, pero {sender_ip} sigue a {sender_leader}")
+            print(f"[BULLY] Iniciando elección para resolver conflicto...")
+            threading.Thread(target=self.start_election, daemon=True).start()
+        
+        # Si tengo un líder y alguien con IP más alta me reta, debo iniciar elección
+        elif self.leader_ip and sender_ip > self.local_ip:
+            print(f"[BULLY] {sender_ip} (IP más alta) me reta. Iniciando elección.")
+            threading.Thread(target=self.start_election, daemon=True).start()
+        
+        return {
+            'status': 'alive', 
+            'responder_ip': self.local_ip, 
+            'is_leader': self.state == STATE_LEADER,
+            'my_leader': self.leader_ip
+        }
