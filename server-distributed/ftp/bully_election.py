@@ -112,3 +112,68 @@ class BullyElection:
             'is_leader': self.state == STATE_LEADER,
             'my_leader': self.leader_ip
         }
+
+    def handle_coordinator_msg(self, message):
+        """Alguien se declara líder"""
+        leader_ip = message.get('leader_ip')
+        leader_id = message.get('leader_id')
+        cluster_ips = message.get('cluster_ips', [])
+        
+        print(f"[BULLY] Recibido COORDINATOR de {leader_ip} (ID: {leader_id})")
+        
+        # Limpiar estado de reconstrucción cuando seguimos a otro líder
+        self.reconstructing = False
+        
+        # SI YO SOY EL LÍDER Y RECIBO COORDINATOR DE UN NODO CON IP MÁS BAJA
+        if self.state == STATE_LEADER:
+            if leader_ip < self.local_ip:
+                print(f"[BULLY] Yo soy líder pero {leader_ip} tiene IP más baja ({self.local_ip}). Cediendo liderazgo.")
+                with self.election_lock:
+                    self.state = STATE_FOLLOWER
+                    self.leader_ip = leader_ip
+                    print(f"[BULLY] Ahora sigo a {leader_ip} como líder")
+                    self._cancel_coordinator_timer()
+                return {'status': 'ok', 'accepted_by': self.local_ip}
+            else:
+                print(f"[BULLY] Yo ya soy líder. Ignorando COORDINATOR de {leader_ip}")
+                return {'status': 'ignored', 'reason': 'already_leader'}
+        
+        # Si ya tengo un líder diferente
+        if self.leader_ip and self.leader_ip != leader_ip:
+            # Verificar si mi líder actual está vivo (en la lista de cluster_ips)
+            if self.leader_ip not in cluster_ips:
+                # Mi líder anterior no está vivo, aceptar al nuevo
+                print(f"[BULLY] Mi líder anterior {self.leader_ip} no está vivo. Aceptando {leader_ip}.")
+                with self.election_lock:
+                    self.leader_ip = leader_ip
+                    self.state = STATE_FOLLOWER
+                    self._cancel_coordinator_timer()
+                    print(f"[BULLY] Nuevo líder aceptado: {leader_ip}")
+                    return {'status': 'ok', 'accepted_by': self.local_ip}
+            else:
+                # AMBOS líderes están vivos → usar "IP más baja gana"
+                if leader_ip < self.leader_ip:
+                    print(f"[BULLY] {leader_ip} es IP más baja que {self.leader_ip}. Cambiando de líder.")
+                    with self.election_lock:
+                        self.leader_ip = leader_ip
+                        self.state = STATE_FOLLOWER
+                        self._cancel_coordinator_timer()
+                        return {'status': 'ok', 'accepted_by': self.local_ip}
+                else:
+                    print(f"[BULLY] Rechazando COORDINATOR de {leader_ip} (mi líder {self.leader_ip} tiene IP más baja)")
+                    return {'status': 'rejected', 'reason': 'higher_ip_leader_exists'}
+        
+        # Si no tengo líder o es el mismo, aceptar
+        with self.election_lock:
+            self.leader_ip = leader_ip
+            self.state = STATE_FOLLOWER
+            print(f"[BULLY] Nuevo líder aceptado: {leader_ip}")
+            
+            # Actualizar lista de IPs
+            if cluster_ips:
+                self.known_ips = sorted(list(set(self.known_ips + cluster_ips)))
+                print(f"[BULLY] Lista de nodos actualizada: {self.known_ips}")
+            
+            self._cancel_coordinator_timer()
+        
+        return {'status': 'ok', 'accepted_by': self.local_ip}
