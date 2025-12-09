@@ -426,3 +426,37 @@ class BullyElection:
             print(f"[BULLY] Error al verificar replicación: {e}")
             import traceback
             traceback.print_exc()  # Para depuración
+
+    def _send_sync_commands(self, target_ip: str, message: Dict):
+        """Envía comandos de sincronización a un nodo"""
+        try:
+            response = self.cluster_comm.send_message(target_ip, message, expect_response=True)
+            if response and response.get('status') == 'ok':
+                print(f"[LIDER-SYNC] Comandos de sincronización aceptados por {target_ip}")
+            else:
+                print(f"[LIDER-SYNC] Error en sincronización con {target_ip}: {response}")
+        except Exception as e:
+            print(f"[LIDER-SYNC] Error enviando comandos a {target_ip}: {e}")
+
+    def _send_coordinator_to_ips(self, target_ips: List[str]):
+        """
+        Envía COORDINATOR a IPs específicas.
+        """
+        msg = {
+            'type': 'COORDINATOR',
+            'leader_ip': self.local_ip,
+            'leader_id': self.node_id,
+            'timestamp': time.time(),
+            'cluster_ips': self.known_ips
+        }
+        
+        for target_ip in target_ips:
+            if target_ip != self.local_ip:
+                print(f"[BULLY] Enviando COORDINATOR de bienvenida a {target_ip}")
+                threading.Thread(
+                    target=lambda ip: self.cluster_comm.send_message(ip, msg, expect_response=False),
+                    args=(target_ip,),
+                    daemon=True
+                ).start()
+        
+        print(f"[BULLY] COORDINATOR enviado a {len(target_ips)} nodos. Sincronización en handle_node_join.")
