@@ -177,3 +177,110 @@ class BullyElection:
             self._cancel_coordinator_timer()
         
         return {'status': 'ok', 'accepted_by': self.local_ip}
+
+    # --- MANEJO DE ELECCIONES ---
+
+    def start_election(self):
+        """
+        Lógica 'IP más baja gana'.
+        """
+        with self.election_lock:
+            if self.state == STATE_ELECTION:
+                return  # Ya en elección
+            self.state = STATE_ELECTION
+            print(f"[BULLY] Iniciando proceso de elección...")
+            self._cancel_coordinator_timer()
+        
+        time.sleep(random.uniform(0.1, 0.5))  # Pequeño delay aleatorio
+        
+        # Obtener IPs de nodos con IP más baja
+        lower_ips = [ip for ip in self.known_ips if ip < self.local_ip]
+        
+        # CASO 1: SOY LA IP MÁS BAJA
+        if not lower_ips:
+            print("[BULLY] Soy la IP más baja disponible. Declaro victoria inmediatamente.")
+            self._declare_victory()
+            return
+
+        # CASO 2: Enviar ELECTION a nodos con IP más baja
+        print(f"[BULLY] Enviando mensajes ELECTION a nodos menores: {lower_ips}")
+        
+        election_results = []
+        
+        def challenge_node(target_ip):
+            try:
+                response = self.cluster_comm.send_message(
+                    target_ip, 
+                    {
+                        'type': 'ELECTION', 
+                        'sender_ip': self.local_ip,
+                        'timestamp': time.time(),
+                        'current_leader': self.leader_ip
+                    },
+                    expect_response=True
+                )
+                election_results.append((target_ip, response))
+            except Exception as e:
+                print(f"[BULLY] Nodo {target_ip} no respondió: {e}")
+        
+        # Desafiar a todos los nodos menores en paralelo
+        threads = []
+        for target_ip in lower_ips:
+            t = threading.Thread(target=challenge_node, args=(target_ip,), daemon=True)
+            threads.append(t)
+            t.start()
+        
+        # Esperar respuestas (tiempo máximo 2 segundos)
+        for t in threads:
+            t.join(timeout=2.0)
+        
+        # Evaluar respuestas
+        any_alive = False
+        for target_ip, response in election_results:
+            if response and response.get('status') == 'alive':
+                print(f"[BULLY] Nodo menor {target_ip} respondió 'alive'.")
+                any_alive = True
+                break
+        
+        if any_alive:
+            print("[BULLY] Nodos menores están vivos. Me retiro y espero COORDINATOR.")
+            with self.election_lock:
+                self.state = STATE_FOLLOWER
+                self._schedule_coordinator_timeout()  # Programar timeout
+        else:
+            print("[BULLY] Ningún nodo menor respondió. Asumo liderazgo.")
+            self._declare_victory()
+
+    def _declare_victory(self):
+        """Me convierto en Líder y notifico a todos"""
+        with self.election_lock:
+            if self.state == STATE_LEADER:
+                print(f"[BULLY] Ya soy líder, ignorando declaración de victoria.")
+                return
+                
+            self.state = STATE_LEADER
+            self.leader_ip = self.local_ip
+            self.reconstructing = False
+            print(f"[BULLY] ¡SOY EL LÍDER! ({self.local_ip})")
+            self._cancel_coordinator_timer()
+        
+        # Notificar a TODOS los nodos conocidos
+        msg = {
+            'type': 'COORDINATOR',
+            'leader_ip': self.local_ip,
+            'leader_id': self.node_id,
+            'timestamp': time.time(),
+            'cluster_ips': self.known_ips
+        }
+        
+        def send_coordinator():
+            try:
+                responses = self.cluster_comm.broadcast_message(msg, expect_responses=False)
+                print(f"[BULLY] Mensaje COORDINATOR enviado a {len(responses)} nodos")
+            except Exception as e:
+                print(f"[BULLY] Error enviando COORDINATOR: {e}")
+            
+            # Ejecutar acciones del líder
+            self._on_leadership_gained()
+        
+        threading.Thread(target=send_coordinator, daemon=True).start()
