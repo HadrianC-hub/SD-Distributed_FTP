@@ -481,3 +481,42 @@ class BullyElection:
             self.coordinator_timer.cancel()
             self.coordinator_timer = None
 
+    # --- LLAMADAS EXTERNAS PARA COMPROBACIÓN DE ESTADO ---
+
+    def is_reconstructing(self):
+        """Retorna si el líder está reconstruyendo."""
+        with self.election_lock:
+            return self.reconstructing
+
+    def get_leader(self):
+        with self.election_lock:
+            return self.leader_ip
+
+    def am_i_leader(self):
+        with self.election_lock:
+            return self.state == STATE_LEADER
+
+    # --- MANEJO DE ARCHIVOS ZOMBIES ---
+
+    def periodic_zombie_cleanup(self):
+        """
+        Ejecuta una limpieza periódica de zombies en todos los nodos.
+        Esto detecta archivos huérfanos que puedan haber quedado.
+        """
+        if not self.am_i_leader():
+            return
+        
+        print("[BULLY] Iniciando limpieza periódica de zombies...")
+        
+        for node_ip in self.known_ips:
+            if node_ip == self.local_ip:
+                continue
+            
+            try:
+                # Solicitar logs y escaneo
+                from ftp.sidecar import handle_node_join
+                handle_node_join(node_ip)
+            except Exception as e:
+                print(f"[BULLY] Error en limpieza de {node_ip}: {e}")
+        
+        print("[BULLY] Limpieza periódica completada")
