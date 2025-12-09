@@ -309,3 +309,120 @@ class BullyElection:
                     ops.check_replication_status()
         
         threading.Thread(target=schedule_forced_replication, daemon=True).start()
+
+    def _execute_log_sync(self):
+        """
+        Solicita logs a todos los nodos, fusiona y actualiza el mapa global.
+        """
+        # Solo marcar reconstructing si somos líder
+        if self.state == STATE_LEADER:
+            self.reconstructing = True
+            print("[BULLY] Líder entrando en modo reconstrucción")
+        
+        time.sleep(2)  # Dar tiempo a que todos acepten el nuevo líder
+        
+        follower_ips = [ip for ip in self.known_ips if ip != self.local_ip]
+        
+        if not follower_ips:
+            print("[LIDER-SYNC] No hay otros nodos.")
+            if self.state == STATE_LEADER:
+                self.reconstructing = False
+            return
+        
+        # Mapeo de IP -> logs para análisis detallado
+        ip_to_logs = {}
+        
+        # Recoger mi propio log primero
+        leader_logs = self.state_manager.get_full_log_as_dict()
+        ip_to_logs[self.local_ip] = leader_logs
+        
+        print(f"[LIDER-SYNC] Solicitando logs a {len(follower_ips)} seguidores...")
+        
+        for target_ip in follower_ips:
+            try:
+                response = self.cluster_comm.send_message(
+                    target_ip, 
+                    {
+                        'type': 'REQUEST_LOGS', 
+                        'leader_ip': self.local_ip,
+                        'timestamp': time.time()
+                    }
+                )
+                
+                if response and response.get('status') == 'ok' and 'log' in response:
+                    print(f"[LIDER-SYNC] Logs recibidos de {target_ip}. Tamaño: {len(response['log'])} entradas.")
+                    ip_to_logs[target_ip] = response['log']
+                else:
+                    print(f"[LIDER-SYNC] Error o nodo sin log: {target_ip}")
+
+            except Exception as e:
+                print(f"[LIDER-SYNC] Error comunicando con {target_ip} para logs: {e}")
+                if self.state == STATE_LEADER:
+                    self.reconstructing = False
+
+        # Fusionar todos los logs - CORRECCIÓN: Crear estructura correcta
+        print(f"[LIDER-SYNC] Fusionando {len(ip_to_logs)} fuentes...")
+        
+        # Crear lista con estructura correcta para merge_external_logs
+        all_logs_with_ips = []
+        for node_ip, logs in ip_to_logs.items():
+            all_logs_with_ips.append({
+                'node_ip': node_ip,
+                'log': logs
+            })
+        
+        self.state_manager.merge_external_logs(all_logs_with_ips)
+        
+        # Detectar inconsistencias y ordenar sincronización
+        print(f"[LIDER-SYNC] Analizando inconsistencias en {len(ip_to_logs)} nodos...")
+        
+        for node_ip, node_logs in ip_to_logs.items():
+            if node_ip != self.local_ip:  # No comparar consigo mismo
+                analysis = self.state_manager.analyze_node_state(node_logs, node_ip)
+                
+                if analysis['has_inconsistencies']:
+                    print(f"[LIDER-SYNC] Nodo {node_ip} tiene {len(analysis['inconsistencies'])} inconsistencias")
+                    
+                    # Enviar comandos de sincronización
+                    if analysis['inconsistencies']:
+                        sync_msg = {
+                            'type': 'SYNC_COMMANDS',
+                            'commands': analysis['inconsistencies'],
+                            'leader_ip': self.local_ip,
+                            'timestamp': time.time()
+                        }
+                        
+                        threading.Thread(
+                            target=lambda ip, msg: self._send_sync_commands(ip, msg),
+                            args=(node_ip, sync_msg),
+                            daemon=True
+                        ).start()
+                else:
+                    print(f"[LIDER-SYNC] Nodo {node_ip} está sincronizado")
+        
+        print("[LIDER-SYNC] Reconstrucción completada.")
+        if self.state == STATE_LEADER:
+            self.reconstructing = False
+            print("[BULLY] Líder completó reconstrucción")
+            
+            # Auto-limpieza del líder DESACTIVADA durante sincronización inicial
+            # Solo se ejecuta en GC periódico (cuando el sistema está estable)
+            print("[BULLY] Auto-limpieza diferida al GC periódico (sistema en sincronización)")
+            
+            # Verificar y reparar réplicas insuficientes
+            self._check_and_repair_replication()
+
+    def _check_and_repair_replication(self):
+        """Verifica y repara archivos con réplicas insuficientes."""
+        try:
+            from ftp.leader_operations import get_leader_operations
+            ops = get_leader_operations(self.cluster_comm, self)
+            if ops:
+                print("[BULLY] Verificando estado de replicación tras reconstrucción...")
+                ops.check_replication_status()
+            else:
+                print("[BULLY] No se pudo obtener LeaderOperations para verificar replicación.")
+        except Exception as e:
+            print(f"[BULLY] Error al verificar replicación: {e}")
+            import traceback
+            traceback.print_exc()  # Para depuración
