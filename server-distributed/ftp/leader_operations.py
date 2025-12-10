@@ -868,3 +868,55 @@ class LeaderOperations:
         
         print("[LEADER-GC] Garbage collection global completado")
 
+# Singleton para LeaderOperations
+_leader_ops_global = None
+
+def get_leader_operations(cluster_comm=None, bully=None):
+    global _leader_ops_global
+    if _leader_ops_global is None and cluster_comm and bully:
+        _leader_ops_global = LeaderOperations(cluster_comm, bully)
+    return _leader_ops_global
+
+def process_local_leader_request(message_type: str, data: Dict, cluster_comm=None, bully=None) -> Dict:
+    if cluster_comm is None or bully is None:
+        from ftp.sidecar import get_global_cluster_comm, get_global_bully
+        cluster_comm = get_global_cluster_comm()
+        bully = get_global_bully()
+        
+    ops = get_leader_operations(cluster_comm, bully)
+    
+    # Mapeo simple de strings a métodos
+    method_name = f"handle_{message_type.lower()}_request"
+    if hasattr(ops, method_name):
+        method = getattr(ops, method_name)
+        try:
+            if message_type in ['MKD', 'RMD', 'DELE', 'RETR', 'RNFR', 'RNTO', 'ENSURE_USER_DIR']:
+                if message_type == 'RNFR':
+                    return ops.handle_rnfr_request(data.get('requester'), data.get('path'), data.get('session_user'))
+                elif message_type == 'RNTO':
+                    return ops.handle_rnto_request(
+                        data.get('requester'), 
+                        data.get('old_path'), 
+                        data.get('new_path'), 
+                        data.get('lock_id'), 
+                        data.get('session_user')
+                    )
+                else:
+                    return method(data.get('requester'), data.get('path') or data.get('user_root'), data.get('session_user'))
+            elif message_type == 'APPE':
+                return ops.handle_appe_request(data.get('requester'), data.get('path'), data.get('size'), data.get('session_user'))
+            elif message_type == 'RELEASE_LOCK':
+                return ops.handle_release_lock_request(data.get('requester'), data.get('path'), data.get('session_user'))
+            elif message_type == 'STOR':
+                return method(data.get('requester'), data.get('path'), data.get('size', 0), data.get('hash'), data.get('session_user'), data.get('append', False))
+            elif message_type in ['LIST', 'NLST', 'CWD', 'PWD', 'CDUP']:
+                 return method(data.get('requester'), data.get('abs_path'), data.get('user_root'), data.get('session_user'))
+            elif message_type == 'RNTO':
+                return method(data.get('requester'), data.get('old_path'), data.get('new_path'), data.get('lock_id'), data.get('session_user'))
+            elif message_type == 'COMPLETION':
+                return ops.handle_completion(data.get('operation_id'), data.get('success'), data.get('message'))
+        except Exception as e:
+            print(f"Error invoking {method_name}: {e}")
+            return {'status': 'error', 'message': str(e)}
+
+    return {'status': 'error', 'message': f'Unknown type {message_type}'}
