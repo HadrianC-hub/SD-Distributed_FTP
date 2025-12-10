@@ -632,3 +632,239 @@ class LeaderOperations:
             
             return len(locked_paths) > 0, locked_paths
 
+    # --- LLAMADAS EXTERNAS ---
+
+    def handle_node_join(self, new_ip: str):
+        """Cuando se une un nodo, verificamos todo el sistema."""
+        print(f"[LEADER] Nodo unido {new_ip}. Ejecutando chequeo de replicación...")
+        self.check_replication_status()
+
+    def handle_node_failure(self, failed_ip: str):
+        """Cuando un nodo falla, limpiamos y reparamos."""
+        print(f"[LEADER] Nodo fallido {failed_ip}. Limpiando mapa y reparando...")
+        
+        # Liberar todos los locks que tenía este nodo
+        with self.lock_mgr.lock:
+            locks_to_release = []
+            for path, lock_info in self.lock_mgr.locks.items():
+                if lock_info.get('holder') == failed_ip:
+                    locks_to_release.append(path)
+            
+            for path in locks_to_release:
+                print(f"[LEADER] Liberando lock de nodo fallido {failed_ip} en {path}")
+                del self.lock_mgr.locks[path]
+
+        with self.state_mgr.lock:
+            for path, info in self.state_mgr.file_map.items():
+                if 'replicas' in info and failed_ip in info['replicas']:
+                    info['replicas'].remove(failed_ip)
+        
+        self.check_replication_status()
+
+    def check_replication_status(self):
+        """
+        Verifica la salud de todos los archivos. 
+        Si faltan réplicas, las crea. Si sobran (por nodos muertos), limpia el mapa.
+        """
+        # Obtenemos nodos disponibles (excluyendo 'localhost' si se colara)
+        available_nodes = [ip for ip in self.cluster_comm.cluster_ips if ip != '127.0.0.1']
+        
+        # Si hay menos de 2 nodos, es difícil replicar, pero si soy el único, debo tenerlo todo.
+        if not available_nodes: 
+            return
+
+        print(f"[LEADER-CHECK] Verificando salud con nodos disponibles: {available_nodes}")
+
+        files_to_repair = []
+
+        with self.state_mgr.lock:
+            for path, info in self.state_mgr.file_map.items():
+                if info.get('type') == 'file':
+                    current_replicas = info.get('replicas', [])
+                    
+                    # 1. Limpiar réplicas fantasma (nodos que ya no están en el cluster)
+                    valid_replicas = [ip for ip in current_replicas if ip in available_nodes]
+                    
+                    # Si hubo cambios, actualizamos el mapa inmediatamente
+                    if len(valid_replicas) != len(current_replicas):
+                        print(f"[LEADER-CHECK] Limpiando réplicas muertas para {path}. Eran: {current_replicas} -> Son: {valid_replicas}")
+                        info['replicas'] = valid_replicas
+
+                    # 2. Verificar si necesitamos más réplicas
+                    # Objetivo: 3 réplicas, o el total de nodos si hay menos de 3
+                    target_count = min(3, len(available_nodes))
+                    
+                    if len(valid_replicas) < target_count:
+                        # Añadimos a la lista para reparar fuera del lock principal si es posible,
+                        # o procesamos aquí. Para simplificar, procesamos aquí pero enviamos hilos.
+                        files_to_repair.append((path, valid_replicas.copy()))
+
+        # Procesar reparaciones
+        for path, valid_replicas in files_to_repair:
+            self._repair_file(path, valid_replicas, available_nodes)
+
+    def _repair_file(self, path: str, current_replicas: List[str], available_nodes: List[str]):
+        """
+        Coordina la replicación de un archivo hacia nuevos nodos.
+        """
+        if not current_replicas:
+            print(f"[LEADER-REPAIR] CRÍTICO: Archivo {path} perdido completamente (0 réplicas vivas).")
+            return
+
+        # El nodo fuente será el primero de los que tienen el archivo
+        source_node = current_replicas[0]
+        
+        # Candidatos: Nodos disponibles que NO tienen el archivo
+        candidates = [ip for ip in available_nodes if ip not in current_replicas]
+        
+        if not candidates:
+            print(f"[LEADER-REPAIR] No hay candidatos disponibles para replicar {path}")
+            return
+
+        # Cuántos faltan
+        target_count = min(3, len(available_nodes))
+        needed = target_count - len(current_replicas)
+        
+        # Seleccionar objetivos
+        targets = candidates[:needed]
+        
+        print(f"[LEADER-REPAIR] Reparando {path}. Fuente: {source_node}. Destinos: {targets}")
+        
+        file_info = self.state_mgr.get_file_info(path)
+        
+        for target_ip in targets:
+            # 1. Actualización OPTIMISTA del mapa global
+            # Marcamos que el nodo ya tiene la réplica para evitar que el próximo check
+            # lance otra orden antes de que esta termine.
+            with self.state_mgr.lock:
+                if path in self.state_mgr.file_map:
+                    self.state_mgr.file_map[path]['replicas'].append(target_ip)
+
+            # 2. Enviar orden
+            self._send_replicate_order(
+                target_ip, 
+                path, 
+                source_node, 
+                file_info.get('size', 0), 
+                file_info.get('hash', ''), 
+                f"repair_{int(time.time())}"
+            )
+
+    def run_garbage_collection(self):
+        """
+        Ejecuta garbage collection en TODOS los nodos del cluster.
+        Escanea discos y elimina archivos/directorios obsoletos.
+        Maneja el caso local (Líder) y remoto por separado.
+        """
+        print("[LEADER-GC] Iniciando garbage collection global del cluster...")
+        
+        all_nodes = self.cluster_comm.cluster_ips.copy()
+        root_path = os.environ.get('SERVER_ROOT', '/app/server/data')
+        
+        for node_ip in all_nodes:
+            try:
+                print(f"[LEADER-GC] Analizando nodo {node_ip}...")
+                
+                node_logs = []
+                disk_scan = None
+                
+                # --- CASO 1: NODO LOCAL (LÍDER) ---
+                if node_ip == self.cluster_comm.local_ip:
+                    print(f"[LEADER-GC] (Local) Obteniendo logs y escaneo de disco internamente...")
+                    # 1. Obtener logs directamente de memoria
+                    node_logs = self.state_mgr.get_full_log_as_dict()
+                    
+                    # 2. Escanear disco directamente
+                    disk_scan = self.state_mgr.scan_local_filesystem(root_path)
+                    print(f"[LEADER-GC] (Local) Escaneados {len(disk_scan)} elementos en disco")
+
+                # --- CASO 2: NODO REMOTO ---
+                else:
+                    # 1. Solicitar logs via red
+                    resp_logs = self.cluster_comm.send_message(
+                        node_ip, 
+                        {'type': 'REQUEST_LOGS'}, 
+                        expect_response=True
+                    )
+                    
+                    if not resp_logs or resp_logs.get('status') != 'ok':
+                        print(f"[LEADER-GC] No se pudieron obtener logs de {node_ip}")
+                        continue
+                    
+                    node_logs = resp_logs.get('log', [])
+                    
+                    # 2. Solicitar escaneo de disco via red
+                    resp_scan = self.cluster_comm.send_message(
+                        node_ip,
+                        {
+                            'type': 'REQUEST_DISK_SCAN',
+                            'root_path': root_path
+                        },
+                        expect_response=True
+                    )
+                    
+                    if resp_scan and resp_scan.get('status') == 'ok':
+                        disk_scan = resp_scan.get('disk_scan', {})
+                        print(f"[LEADER-GC] Escaneados {len(disk_scan)} elementos en {node_ip}")
+
+                # --- 3. ANÁLISIS COMÚN ---
+                # Usamos la misma lógica de análisis para ambos casos
+                analysis = self.state_mgr.analyze_node_state(node_logs, node_ip, disk_scan, safe_mode=False)
+                
+                if not analysis['has_inconsistencies']:
+                    print(f"[LEADER-GC] Nodo {node_ip} está limpio")
+                    continue
+                
+                # 4. Filtrar solo comandos de limpieza (prioridad 1) - Zombies
+                zombies = [cmd for cmd in analysis['inconsistencies'] 
+                           if cmd.get('priority', 99) == 1]
+                
+                if not zombies:
+                    print(f"[LEADER-GC] Nodo {node_ip} no tiene zombies")
+                    continue
+                
+                print(f"[LEADER-GC] Detectados {len(zombies)} zombies en {node_ip}")
+                
+                # --- EJECUCIÓN DE LIMPIEZA ---
+                
+                if node_ip == self.cluster_comm.local_ip:
+                    # EJECUCIÓN LOCAL
+                    print(f"[LEADER-GC] (Local) Ejecutando limpieza interna...")
+                    # Importación local para evitar ciclos
+                    from ftp.sidecar import handle_sync_commands
+                    
+                    # Simulamos el mensaje para reutilizar la lógica de sidecar
+                    local_msg = {
+                        'commands': zombies,
+                        'phase': 'garbage_collection'
+                    }
+                    result = handle_sync_commands(local_msg)
+                    stats = result.get('stats', {})
+                    print(f"[LEADER-GC] (Local): {stats.get('zombies_deleted', 0)} zombies eliminados")
+                    
+                else:
+                    # EJECUCIÓN REMOTA
+                    cleanup_response = self.cluster_comm.send_message(
+                        node_ip,
+                        {
+                            'type': 'SYNC_COMMANDS',
+                            'commands': zombies,
+                            'phase': 'garbage_collection',
+                            'block_until_complete': True
+                        },
+                        expect_response=True
+                    )
+                    
+                    if cleanup_response and cleanup_response.get('status') == 'ok':
+                        stats = cleanup_response.get('stats', {})
+                        print(f"[LEADER-GC] {node_ip}: {stats.get('zombies_deleted', 0)} zombies eliminados")
+                    else:
+                        print(f"[LEADER-GC] Error en limpieza remota de {node_ip}")
+                    
+            except Exception as e:
+                print(f"[LEADER-GC] Error procesando {node_ip}: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        print("[LEADER-GC] Garbage collection global completado")
+
