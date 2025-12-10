@@ -455,3 +455,180 @@ class LeaderOperations:
             self.state_mgr.file_map[user_root] = {'type': 'dir', 'mtime': time.time(), 'replicas': self.cluster_comm.cluster_ips}
         return {'status': 'ok'}
     
+    # --- FUNCIONES AUXILIARES ---
+
+    def calculate_replica_nodes(self, filename: str, size: int = 0) -> List[str]:
+        all_ips = sorted(self.cluster_comm.cluster_ips)
+        if not all_ips: return []
+        if len(all_ips) <= 3: return all_ips
+        
+        # Hash consistente simple
+        file_hash = hashlib.md5(filename.encode()).hexdigest()
+        start_idx = int(file_hash, 16) % len(all_ips)
+        
+        replicas = []
+        for i in range(3):
+            replicas.append(all_ips[(start_idx + i) % len(all_ips)])
+            
+        return list(set(replicas))
+
+    def acquire_file_lock(self, path: str, holder_ip: str, lock_type: str = 'write') -> Tuple[bool, str]:
+        success = self.lock_mgr.acquire_lock(path, holder_ip, lock_type)
+        if success:
+            return True, f"{path}_{holder_ip}_{lock_type}_{time.time()}"
+        else:
+            current = self.lock_mgr.locks.get(path, {})
+            return False, f"Locked by {current.get('holder', 'unknown')}"
+    
+    def release_file_lock(self, path: str, holder_ip: str):
+        return self.lock_mgr.release_lock(path, holder_ip)
+    
+    def _send_rename_order_to_nodes(self, old_path: str, new_path: str, 
+                                nodes: List[str], operation_id: str, 
+                                item_type: str = 'file', files_in_dir: List = None):
+        """Envía orden de renombrar a los nodos réplica."""
+        message = {
+            'type': 'FS_ORDER',
+            'command': 'RENAME',
+            'old_path': old_path,
+            'new_path': new_path,
+            'operation_id': operation_id,
+            'item_type': item_type,
+            'is_directory': item_type == 'dir',
+            'timestamp': time.time(),
+            'must_execute_on_all': item_type == 'dir'  # Flag para directorios
+        }
+        
+        # Si es un directorio, incluir información de archivos dentro
+        if item_type == 'dir' and files_in_dir:
+            # Solo incluir metadatos básicos para no hacer el mensaje muy grande
+            message['files_in_dir'] = [
+                {
+                    'old_path': path,
+                    'new_path': new_path.rstrip('/') + '/' + os.path.relpath(path, old_path),
+                    'type': info.get('type', 'file')
+                }
+                for path, info in files_in_dir[:10]  # Limitar a 10 para no sobrecargar
+            ]
+            message['total_files_in_dir'] = len(files_in_dir)
+        
+        local_ip = self.cluster_comm.local_ip
+        
+        print(f"[LEADER] Enviando orden RENAME a {len(nodes)} nodos: {old_path} -> {new_path}")
+        
+        for node_ip in nodes:
+            if node_ip == local_ip:
+                # Ejecutar localmente en un hilo
+                from ftp.sidecar import handle_fs_order
+                threading.Thread(
+                    target=handle_fs_order,
+                    args=(message,),
+                    daemon=True
+                ).start()
+                print(f"[LEADER] Orden de renombrar enviada localmente: {old_path} -> {new_path}")
+            else:
+                # Enviar a nodo remoto
+                threading.Thread(
+                    target=self.cluster_comm.send_message,
+                    args=(node_ip, message, False),
+                    daemon=True
+                ).start()
+                print(f"[LEADER] Orden de renombrar enviada a {node_ip}: {old_path} -> {new_path}")
+
+    def _send_operation_to_nodes(self, command, path, nodes, op_id, wait=True):
+        """
+        Envía operaciones a los nodos.
+        Args:
+            wait (bool): Si es True, el líder espera a que los nodos confirmen (o fallen) 
+                         antes de retornar. Esto evita que el cliente mande RMD antes 
+                         de que DELE termine.
+        """
+        msg = {'type': 'FS_ORDER', 'command': command, 'path': path, 'operation_id': op_id}
+        local = self.cluster_comm.local_ip
+        
+        active_threads = []
+
+        for ip in nodes:
+            if ip == local:
+                from ftp.sidecar import handle_fs_order
+                t = threading.Thread(target=handle_fs_order, args=(msg,), daemon=True)
+                t.start()
+                active_threads.append(t)
+            else:
+                # Usamos expect_response=wait para que el envío sea bloqueante si es necesario
+                t = threading.Thread(
+                    target=self.cluster_comm.send_message, 
+                    args=(ip, msg, wait), 
+                    daemon=True
+                )
+                t.start()
+                active_threads.append(t)
+
+        # Si wait es True, esperamos a que todos los hilos terminen su trabajo
+        if wait:
+            for t in active_threads:
+                t.join(timeout=5.0) # Timeout de seguridad para no bloquear eternamente
+
+    def _send_replicate_order(self, target_ip: str, file_path: str, source_ip: str, size: int, file_hash: str, operation_id: str):
+        """Envía orden de replicación a un nodo (puede ser local o remoto)."""
+        message = {
+            'type': 'FS_ORDER',
+            'command': 'REPLICATE_FILE',
+            'path': file_path,
+            'source': source_ip,
+            'size': size,
+            'hash': file_hash,
+            'operation_id': operation_id,
+            'timestamp': time.time(),
+            'is_repair': True
+        }
+        
+        local_ip = self.cluster_comm.local_ip
+
+        if target_ip == local_ip:
+            print(f"[LEADER] Auto-replicación: Ordenando descarga local de {file_path} desde {source_ip}")
+            # Importación local para evitar ciclos
+            from ftp.sidecar import handle_fs_order
+            threading.Thread(
+                target=handle_fs_order,
+                args=(message,),
+                daemon=True
+            ).start()
+        else:
+            print(f"[LEADER] Replicación remota: Ordenando a {target_ip} descargar {file_path} desde {source_ip}")
+            threading.Thread(
+                target=self.cluster_comm.send_message,
+                args=(target_ip, message, False),
+                daemon=True
+            ).start()
+
+    def _check_locks_recursive(self, path: str) -> Tuple[bool, List[str]]:
+            """
+            Verifica si hay locks activos en un path o sus descendientes.
+            
+            Returns:
+                (has_locks, locked_paths): 
+                    - has_locks: True si hay algún lock activo
+                    - locked_paths: Lista de rutas bloqueadas
+            """
+            locked_paths = []
+            
+            # Verificar el path mismo
+            with self.lock_mgr.lock:
+                if path in self.lock_mgr.locks:
+                    locked_paths.append(path)
+            
+            # Para directorios, verificar todos los archivos dentro
+            with self.state_mgr.lock:
+                dir_prefix = path.rstrip('/') + '/'
+                
+                for file_path in self.state_mgr.file_map.keys():
+                    # Si es un archivo dentro del directorio
+                    if file_path.startswith(dir_prefix) or file_path == path:
+                        with self.lock_mgr.lock:
+                            if file_path in self.lock_mgr.locks:
+                                lock_info = self.lock_mgr.locks[file_path]
+                                locked_paths.append(f"{file_path} (locked by {lock_info['holder']})")
+            
+            return len(locked_paths) > 0, locked_paths
+
