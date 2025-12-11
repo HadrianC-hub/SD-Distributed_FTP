@@ -4,6 +4,12 @@ import time
 import random
 import threading
 from typing import Dict
+from ftp.users import USERS, verify_password
+from ftp.paths import safe_path, generate_unique_filename, is_valid_filename, calculate_file_hash, SERVER_ROOT
+from ftp.state_manager import get_state_manager
+from ftp.node_transfer import get_node_transfer
+from ftp.sidecar import get_global_bully, get_global_cluster_comm
+from ftp.leader_operations import process_local_leader_request
 
 failed_attempts = {}        # Diccionario de intentos fallidos de login por IP
 MAX_FAILED_ATTEMPTS = 3     # Límite de intentos fallidos y tiempo de bloqueo
@@ -1012,3 +1018,351 @@ def ABOR(session):
     close_data_socket(session)
     session.client_socket.sendall(b"426 Aborted.\r\n")
 
+# --- UTILIDADES ---
+
+def get_advertised_ip_for_session(comm_socket):
+    # 1) env var (si existe y no es loopback)
+    env_ip = os.environ.get('FTP_PASV_ADDRESS', '').strip()
+    if env_ip:
+        try:
+            resolved = socket.gethostbyname(env_ip)
+            if not resolved.startswith('127.'):
+                return resolved
+        except Exception:
+            pass
+
+    # 2) IP local del socket de control (lo más fiable en Docker compose)
+    try:
+        local_ip = comm_socket.getsockname()[0]
+        if local_ip and not local_ip.startswith('127.') and local_ip != '0.0.0.0':
+            return local_ip
+    except Exception:
+        pass
+
+    # 3) "UDP trick": averiguar la IP usada para salir a Internet (no realiza conexión real)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith('127.'):
+            return ip
+    except Exception:
+        pass
+
+    # 4) fallback: host resolution (menos fiable)
+    try:
+        host_ip = socket.gethostbyname(socket.gethostname())
+        if not host_ip.startswith('127.'):
+            return host_ip
+    except Exception:
+        pass
+
+    return '127.0.0.1'
+
+def increment_failed_attempts(client_ip):
+    current_time = time.time()
+    if client_ip in failed_attempts:
+        failed_attempts[client_ip]['attempts'] += 1
+    else:
+        failed_attempts[client_ip] = {'attempts': 1, 'block_time': 0}
+    if failed_attempts[client_ip]['attempts'] >= MAX_FAILED_ATTEMPTS:
+        failed_attempts[client_ip]['block_time'] = current_time + BLOCK_TIME
+        return True
+    return False
+
+def close_data_socket(session):
+    """Cierra la conexión de datos de forma segura."""
+    try:
+        if session.data_socket:
+            # Intentar shutdown antes de close
+            try:
+                session.data_socket.shutdown(socket.SHUT_RDWR)
+            except:
+                pass
+            session.data_socket.close()
+    except Exception as e:
+        print(f"[CLOSE_DATA] Error cerrando socket: {e}")
+    finally:
+        session.data_socket = None
+
+def accept_passive_connection(session, timeout=30):
+    """
+    Acepta conexión PASV con manejo mejorado de errores.
+    """
+    if not session.passive_listener:
+        return None
+    
+    session.passive_listener.settimeout(timeout)
+    
+    try:
+        conn, addr = session.passive_listener.accept()
+        session.data_socket = conn
+        
+        # Configurar socket para mejor rendimiento
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        conn.settimeout(30)  # Timeout para transferencias largas
+        
+        # Cerrar listener (una conexión por comando)
+        session.passive_listener.close()
+        session.passive_listener = None
+        
+        return conn
+    except socket.timeout:
+        print("[PASV] Timeout esperando conexión del cliente")
+    except Exception as e:
+        print(f"[PASV] Error aceptando conexión: {e}")
+    
+    # Limpiar en caso de error
+    try:
+        session.passive_listener.close()
+    except:
+        pass
+    session.passive_listener = None
+    return None
+
+def send_local_file(file_path, session):
+    """Envía un archivo local al cliente."""
+    try:
+        mode = 'rb' if session.type == 'I' else 'r'
+        
+        with open(file_path, mode) as f:
+            while True:
+                chunk = f.read(BUFFER_SIZE)
+                if not chunk:
+                    break
+                
+                # Para modo ASCII, asegurar codificación
+                if session.type == 'A' and isinstance(chunk, str):
+                    session.data_socket.sendall(chunk.encode())
+                else:
+                    # Para binario o si ya son bytes
+                    session.data_socket.sendall(chunk)
+        
+        # Cerrar escritura del socket de datos
+        try:
+            session.data_socket.shutdown(socket.SHUT_WR)
+        except:
+            pass
+            
+        return True
+    except Exception as e:
+        print(f"[SEND_FILE] Error enviando archivo: {e}")
+        return False
+    
+def register_local_operation(operation_id, op_type, path, username):
+    """Registra una operación local en el state manager."""
+    state_mgr = get_state_manager()
+    if state_mgr:
+        metadata = {
+            'operation_id': operation_id,
+            'user': username,
+            'local_only': True
+        }
+        state_mgr.append_operation(op_type, path, metadata)
+        print(f"[REGISTER] Operación {op_type} registrada localmente para {path}")
+
+def notify_leader_completion(operation_id, success, session):
+    """Notifica al líder que una operación ha finalizado."""
+    cluster_comm = get_global_cluster_comm()
+    if not cluster_comm:
+        return
+    
+    bully = get_global_bully()
+    if bully and bully.am_i_leader():
+        # Procesar localmente si somos el líder
+        process_local_leader_request('COMPLETION', {
+            'operation_id': operation_id,
+            'success': success,
+            'message': f"Completed by {session.username}"
+        })
+    else:
+        # Enviar al líder
+        leader_ip = bully.get_leader() if bully else None
+        if leader_ip:
+            try:
+                message = {
+                    'type': 'FS_REQUEST',
+                    'subtype': 'COMPLETION',
+                    'data': {
+                        'operation_id': operation_id,
+                        'success': success,
+                        'message': f"Completed by {session.username}"
+                    },
+                    'requester': cluster_comm.local_ip,
+                    'timestamp': time.time()
+                }
+                cluster_comm.send_message(leader_ip, message, expect_response=False)
+            except Exception as e:
+                print(f"[NOTIFY] Error notifying leader: {e}")
+
+def ask_leader(message_type: str, data: Dict, max_retries: int = 3) -> Dict:
+    """Función local para enviar solicitudes al líder con manejo de reconstrucción."""
+    bully = get_global_bully()
+    cluster_comm = get_global_cluster_comm()
+    
+    if not bully or not cluster_comm:
+        return {'status': 'error', 'message': 'Cluster not initialized'}
+    
+    for attempt in range(max_retries):
+        leader_ip = bully.get_leader()
+        
+        if not leader_ip:
+            print(f"[LEADER] No leader available, attempt {attempt + 1}/{max_retries}")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+            else:
+                return {'status': 'error', 'message': 'No leader available after retries'}
+        
+        # Si soy el líder, procesar localmente
+        if leader_ip == cluster_comm.local_ip:
+            return process_local_leader_request(
+                message_type, 
+                data, 
+                cluster_comm=cluster_comm, 
+                bully=bully
+            )
+        
+        # Enviar solicitud al líder
+        message = {
+            'type': 'FS_REQUEST',
+            'subtype': message_type,
+            'data': data,
+            'requester': cluster_comm.local_ip,
+            'timestamp': time.time()
+        }
+        
+        try:
+            response = cluster_comm.send_message(leader_ip, message, expect_response=True)
+            
+            if not response:
+                print(f"[LEADER] Empty response from leader {leader_ip} (attempt {attempt + 1})")
+                time.sleep(1)
+                continue
+                
+            if response.get('status') == 'error' and 'reconstructing' in response.get('message', '').lower():
+                # El líder está reconstruyendo, esperar y reintentar
+                print(f"[LEADER] Leader is reconstructing, waiting 3 seconds...")
+                time.sleep(3)
+                continue
+                
+            return response
+            
+        except Exception as e:
+            print(f"[LEADER] Error contacting leader {leader_ip} (attempt {attempt + 1}): {e}")
+            time.sleep(1)
+            continue
+    
+    return {'status': 'error', 'message': 'Failed to contact leader after retries'}
+
+def register_delta_transfer(delta_file, target_nodes):
+    """Registra una transferencia delta pendiente"""
+    with delta_lock:
+        active_delta_transfers[delta_file] = {
+            'nodes': set(target_nodes),
+            'lock': threading.Lock(),
+            'created_at': time.time()
+        }
+        print(f"[DELTA] Registrado: {delta_file} → {target_nodes}")
+
+def confirm_delta_transfer(delta_file, node_ip):
+    """
+    Marca que un nodo completó la transferencia del delta.
+    Retorna True si ya no quedan nodos pendientes.
+    """
+    with delta_lock:
+        if delta_file not in active_delta_transfers:
+            print(f"[DELTA] Delta {delta_file} ya no está registrado")
+            return True  # Ya fue limpiado
+        
+        transfer_info = active_delta_transfers[delta_file]
+        
+        with transfer_info['lock']:
+            if node_ip in transfer_info['nodes']:
+                transfer_info['nodes'].remove(node_ip)
+                print(f"[DELTA] {node_ip} confirmó {delta_file}. Pendientes: {len(transfer_info['nodes'])}")
+            
+            # Si no quedan nodos pendientes, limpiar registro
+            if not transfer_info['nodes']:
+                del active_delta_transfers[delta_file]
+                print(f"[DELTA] Todos confirmaron, eliminando registro de {delta_file}")
+                return True
+            
+            return False
+
+def cleanup_delta_safe(delta_file, target_nodes, timeout=90):
+    """
+    Elimina el archivo delta SOLO cuando todos los nodos confirmen
+    o cuando expire el timeout de seguridad.
+    """
+    print(f"[DELTA-CLEANUP] Iniciando limpieza de {delta_file}")
+    print(f"[DELTA-CLEANUP] Esperando confirmación de {len(target_nodes)} nodos: {target_nodes}")
+    
+    start_time = time.time()
+    last_check = start_time
+    
+    while time.time() - start_time < timeout:
+        # Verificar cada segundo
+        time.sleep(1)
+        
+        # Log cada 10 segundos
+        if time.time() - last_check >= 10:
+            with delta_lock:
+                if delta_file in active_delta_transfers:
+                    pending = active_delta_transfers[delta_file]['nodes']
+                    elapsed = int(time.time() - start_time)
+                    print(f"[DELTA-CLEANUP] {delta_file}: {len(pending)} nodos pendientes después de {elapsed}s: {pending}")
+                last_check = time.time()
+        
+        # Verificar si ya se completó
+        with delta_lock:
+            if delta_file not in active_delta_transfers:
+                print(f"[DELTA-CLEANUP] Todas las confirmaciones recibidas para {delta_file}")
+                break
+    else:
+        # Timeout alcanzado
+        with delta_lock:
+            if delta_file in active_delta_transfers:
+                pending = active_delta_transfers[delta_file]['nodes']
+                print(f"[DELTA-CLEANUP] TIMEOUT ({timeout}s) alcanzado para {delta_file}")
+                print(f"[DELTA-CLEANUP] Nodos que nunca confirmaron: {pending}")
+                # Forzar limpieza del registro
+                del active_delta_transfers[delta_file]
+    
+    # Eliminar archivo físico
+    if os.path.exists(delta_file):
+        try:
+            os.remove(delta_file)
+            print(f"[DELTA-CLEANUP] Archivo delta eliminado: {delta_file}")
+        except Exception as e:
+            print(f"[DELTA-CLEANUP] Error eliminando {delta_file}: {e}")
+    else:
+        print(f"[DELTA-CLEANUP] Delta {delta_file} ya no existe")
+
+def order_operation_to_nodes(command, path, nodes, operation_id):
+    """Ordena a otros nodos que ejecuten una operación."""
+    cluster_comm = get_global_cluster_comm()
+    if not cluster_comm:
+        return
+    
+    for node_ip in nodes:
+        if node_ip == cluster_comm.local_ip:
+            continue  # Ya lo hicimos localmente
+        
+        try:
+            message = {
+                'type': 'FS_ORDER',
+                'command': command,
+                'path': path,
+                'operation_id': operation_id,
+                'timestamp': time.time()
+            }
+            
+            if command == 'DELETE_DIR':
+                message['check_empty'] = True  # Añade flag para verificar vacío
+            
+            cluster_comm.send_message(node_ip, message, expect_response=False)
+            print(f"[ORDER] Sent {command} for {path} to {node_ip}")
+        except Exception as e:
+            print(f"[ORDER] Error sending to {node_ip}: {e}")
