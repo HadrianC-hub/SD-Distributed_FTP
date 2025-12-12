@@ -1086,3 +1086,148 @@ def _handle_directory_rename(old_path, new_path, operation_id):
         except Exception as e:
             print(f"[ORDER] Error creando directorio: {e}")
             return False
+
+def create_and_log_dirs(final_path, state_mgr, local_ip, operation_id):
+    """Crea directorios y los registra en el log."""
+    try:
+        # Usamos ruta absoluta
+        final_path = os.path.abspath(final_path)
+        
+        # Crear directorio si no existe
+        if not os.path.exists(final_path):
+            os.makedirs(final_path, exist_ok=True)
+            print(f"[ORDER] Directorio creado: {final_path}")
+            
+            # Registrar en log local
+            state_mgr.append_operation(
+                'MKD',
+                final_path,
+                {
+                    'operation_id': operation_id,
+                    'executed_by': local_ip,
+                    'from_order': True
+                }
+            )
+        else:
+            print(f"[ORDER] Directorio ya existía: {final_path}")
+            state_mgr.append_operation(
+                'MKD',
+                final_path,
+                {
+                    'operation_id': operation_id,
+                    'executed_by': local_ip,
+                    'already_exists': True
+                }
+            )
+            
+    except Exception as e:
+        print(f"[ORDER] Error creando directorio {final_path}: {e}")
+
+def handle_node_join(new_ip):
+    """
+    Maneja la entrada de un nodo nuevo o reintegrado.
+    """
+    bully = get_global_bully()
+    if not bully or not bully.am_i_leader():
+        return
+
+    print(f"[SIDECAR] Nodo {new_ip} unido. Iniciando sincronización COMPLETA...")
+    cc = get_global_cluster_comm()
+    
+    # FASE 1: ESCANEO Y ANÁLISIS (con disco real)
+    # 1.1. Solicitar logs del nodo
+    resp_logs = cc.send_message(new_ip, {'type': 'REQUEST_LOGS'}, expect_response=True)
+    
+    if not resp_logs or resp_logs.get('status') != 'ok':
+        print(f"[SIDECAR] No se pudieron obtener logs de {new_ip}")
+        return
+    
+    node_logs = resp_logs.get('log', [])
+    
+    # 1.2. Solicitar escaneo del disco físico
+    print(f"[SIDECAR] Solicitando escaneo de disco a {new_ip}...")
+    resp_scan = cc.send_message(new_ip, {
+        'type': 'REQUEST_DISK_SCAN',
+        'root_path': os.environ.get('SERVER_ROOT', '/app/server/data')
+    }, expect_response=True)
+    
+    disk_scan = None
+    if resp_scan and resp_scan.get('status') == 'ok':
+        disk_scan = resp_scan.get('disk_scan', {})
+        print(f"[SIDECAR] Escaneo recibido: {len(disk_scan)} elementos en disco")
+    else:
+        print(f"[SIDECAR] No se pudo escanear disco, usando solo logs")
+    
+    # 1.3. Analizar inconsistencias (con o sin escaneo de disco)
+    sm = get_state_manager()
+    analysis = sm.analyze_node_state(node_logs, new_ip, disk_scan)
+    
+    # Log detallado
+    print(f"[SIDECAR] Análisis de nodo {new_ip}:")
+    print(f"  - Total inconsistencias: {len(analysis['inconsistencies'])}")
+    print(f"  - Zombies detectados: {analysis.get('node_state_summary', {}).get('zombies_found', 0)}")
+    print(f"  - Usado escaneo de disco: {analysis.get('node_state_summary', {}).get('used_disk_scan', False)}")
+    
+    # FASE 2: SINCRONIZACIÓN EN 2 FASES
+
+    if analysis['has_inconsistencies']:
+        # Separar comandos por prioridad
+        zombies = [cmd for cmd in analysis['inconsistencies'] 
+                   if cmd.get('priority', 99) == 1]
+        replications = [cmd for cmd in analysis['inconsistencies'] 
+                       if cmd.get('priority', 99) >= 2]
+        
+        # 2.1. FASE 1: Eliminar zombies (archivos y directorios obsoletos)
+        if zombies:
+            print(f"[SIDECAR] FASE 1: Limpiando {len(zombies)} zombies...")
+            
+            zombie_response = cc.send_message(new_ip, {
+                'type': 'SYNC_COMMANDS',
+                'commands': zombies,
+                'phase': 'zombie_cleanup',
+                'block_until_complete': True
+            }, expect_response=True)
+            
+            if zombie_response and zombie_response.get('status') == 'ok':
+                stats = zombie_response.get('stats', {})
+                print(f"[SIDECAR] FASE 1 completada: {stats.get('success', 0)} exitosos, {stats.get('errors', 0)} errores")
+            
+            # Dar tiempo para que se completen las eliminaciones
+            time.sleep(2)
+        
+        # 2.2. FASE 2: Replicar archivos faltantes (no bloqueante)
+        if replications:
+            print(f"[SIDECAR] FASE 2: Replicando {len(replications)} archivos faltantes...")
+            
+            # Esta fase no bloquea (async)
+            cc.send_message(new_ip, {
+                'type': 'SYNC_COMMANDS',
+                'commands': replications,
+                'phase': 'replication',
+                'analysis_summary': analysis.get('node_state_summary', {})
+            }, expect_response=False)
+    else:
+        print(f"[SIDECAR] Nodo {new_ip} está completamente sincronizado.")
+    
+    # FASE 3: ASIGNAR NUEVAS RÉPLICAS (después de limpieza)
+    
+    # Esperar un poco más para asegurar que la limpieza terminó
+    time.sleep(1)
+    
+    # Ahora sí, verificar y asignar réplicas necesarias
+    ops = get_leader_operations()
+    if ops:
+        print(f"[SIDECAR] Verificando necesidad de réplicas para {new_ip}...")
+        ops.handle_node_join(new_ip)
+    
+    print(f"[SIDECAR] Sincronización completa de {new_ip} finalizada")
+
+# --- CONSULTAS GLOBALES ---
+
+def get_global_cluster_comm():
+    """Obtiene la instancia global de cluster_comm"""
+    return _cluster_comm_global
+
+def get_global_bully():
+    """Para que otros módulos consulten quién es el líder"""
+    return _bully_instance
