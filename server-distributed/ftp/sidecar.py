@@ -920,3 +920,169 @@ def start_periodic_zombie_cleanup():
                 import traceback
                 traceback.print_exc()
 
+# --- FUNCIONES COMPLEMENTARIAS ---
+
+def handle_node_failure(failed_ip: str):
+    """Maneja la falla de un nodo y coordina la replicación de sus archivos."""
+    print(f"[SIDECAR] Manejando falla del nodo: {failed_ip}")
+    
+    # Si soy el líder, reasignar réplicas
+    bully = get_global_bully()
+    cluster_comm = get_global_cluster_comm()
+    
+    if not bully or not cluster_comm:
+        print(f"[SIDECAR] No se puede manejar falla del nodo: cluster no inicializado")
+        return
+    
+    if bully.am_i_leader():
+        ops = get_leader_operations()
+        if ops:
+            # Usar el método handle_node_failure de LeaderOperations
+            ops.handle_node_failure(failed_ip)
+    else:
+        print(f"[SIDECAR] No soy líder, no manejo fallas de nodos")
+
+def _handle_file_rename(old_path, new_path, operation_id, message):
+    """Maneja el renombrado de archivos."""
+    # Verificar si el archivo existe localmente
+    if os.path.exists(old_path):
+        # Verificar que el destino no exista
+        if os.path.exists(new_path):
+            print(f"[ORDER] ERROR: El archivo destino ya existe: {new_path}")
+            return False
+        
+        # Crear directorios padres si es necesario
+        os.makedirs(os.path.dirname(new_path), exist_ok=True)
+        
+        # Renombrar archivo
+        try:
+            os.rename(old_path, new_path)
+            print(f"[ORDER] Archivo renombrado: {old_path} -> {new_path}")
+            return True
+        except OSError as e:
+            # Capturamos específicamente "Text file busy" (Errno 26 en Linux)
+            if e.errno == 26 or "Text file busy" in str(e):
+                print(f"[ORDER] ERROR: El archivo {old_path} está siendo usado (ETXTBSY). Abortando rename.")
+            else:
+                print(f"[ORDER] Error de OS al renombrar: {e}")
+            
+            # Retornamos False para que el Líder sepa que falló
+            return False 
+
+    else:
+        # El archivo no existe localmente - verificar si somos una réplica
+        state_mgr = get_state_manager()
+        file_info = state_mgr.get_file_info(old_path)
+        
+        if file_info and _cluster_comm_global.local_ip in file_info.get('replicas', []):
+            # Somos una réplica pero el archivo no existe localmente
+            print(f"[ORDER] INCONSISTENCIA: Somos réplica de {old_path} pero no lo tenemos")
+            
+            # Intentar descargar de otra réplica
+            replicas = file_info.get('replicas', [])
+            source_replicas = [ip for ip in replicas if ip != _cluster_comm_global.local_ip]
+            
+            if source_replicas:
+                from ftp.node_transfer import get_node_transfer
+                transfer = get_node_transfer()
+                
+                for source_ip in source_replicas:
+                    print(f"[ORDER] Intentando descargar {old_path} desde {source_ip}")
+                    success, _, _ = transfer.request_file_from_node(source_ip, old_path, old_path)
+                    
+                    if success:
+                        # Ahora renombrar
+                        try:
+                            os.rename(old_path, new_path)
+                            print(f"[ORDER] Archivo renombrado: {old_path} -> {new_path}")
+                            return True
+                        except OSError as e:
+                            # Capturamos específicamente "Text file busy" (Errno 26 en Linux)
+                            if e.errno == 26 or "Text file busy" in str(e):
+                                print(f"[ORDER] ERROR: El archivo {old_path} está siendo usado (ETXTBSY). Abortando rename.")
+                            else:
+                                print(f"[ORDER] Error de OS al renombrar: {e}")
+                            
+                            # Retornamos False para que el Líder sepa que falló
+                            return False 
+        
+        # No somos réplica o no pudimos descargar
+        print(f"[ORDER] No somos réplica de {old_path}, solo actualizamos estado")
+        return True  # Devolvemos True porque actualizamos el estado aunque no tengamos el archivo
+
+def _handle_directory_rename(old_path, new_path, operation_id):
+    """Maneja el renombrado de directorios con limpieza mejorada."""
+    print(f"[ORDER] Renombrando directorio: {old_path} -> {new_path}")
+    
+    # Verificar si el directorio existe localmente
+    if os.path.exists(old_path):
+        # Crear directorio destino si no existe
+        os.makedirs(os.path.dirname(new_path), exist_ok=True)
+        
+        # Verificar que el destino no exista
+        if os.path.exists(new_path):
+            print(f"[ORDER] ERROR: El directorio destino ya existe: {new_path}")
+            
+            # Si el destino existe, puede ser por un renombrado previo
+            # Comparar contenidos para ver si son el mismo
+            try:
+                old_contents = set(os.listdir(old_path)) if os.path.isdir(old_path) else set()
+                new_contents = set(os.listdir(new_path)) if os.path.isdir(new_path) else set()
+                
+                if old_contents == new_contents:
+                    print(f"[ORDER] Los directorios tienen el mismo contenido, eliminando antiguo")
+                    shutil.rmtree(old_path)
+                    return True
+            except Exception as e:
+                print(f"[ORDER] Error comparando directorios: {e}")
+            
+            return False
+        
+        # Renombrar directorio (mueve todo el contenido)
+        try:
+            os.rename(old_path, new_path)
+            print(f"[ORDER] Directorio renombrado: {old_path} -> {new_path}")
+            
+            # Verificar que el antiguo ya no existe
+            if os.path.exists(old_path):
+                print(f"[ORDER] ADVERTENCIA: Directorio antiguo aún existe después de rename")
+                # Intentar limpiarlo
+                try:
+                    if os.path.isdir(old_path) and not os.listdir(old_path):
+                        os.rmdir(old_path)
+                except:
+                    pass
+            
+            return True
+        except OSError as e:
+            print(f"[ORDER] Error de OS al renombrar directorio: {e}")
+            return False
+    else:
+        # El directorio no existe localmente, pero debemos crearlo vacío
+        # Esto es necesario para mantener la estructura de directorios
+        print(f"[ORDER] Directorio {old_path} no existe localmente, creando {new_path}")
+        
+        try:
+            # Crear el nuevo directorio (vacío)
+            os.makedirs(new_path, exist_ok=True)
+            
+            # Verificar si la estructura antigua existe en alguna variación
+            # (puede haber quedado de un renombrado previo incompleto)
+            old_normalized = old_path.rstrip('/')
+            
+            # Buscar directorios similares que puedan ser versiones antiguas
+            parent_dir = os.path.dirname(old_normalized)
+            if os.path.exists(parent_dir):
+                try:
+                    for item in os.listdir(parent_dir):
+                        full_item_path = os.path.join(parent_dir, item)
+                        if full_item_path.startswith(old_normalized) and full_item_path != new_path:
+                            print(f"[ORDER] Detectada posible estructura antigua: {full_item_path}")
+                            # No eliminar automáticamente, solo reportar
+                except Exception as e:
+                    print(f"[ORDER] Error buscando estructuras antiguas: {e}")
+            
+            return True
+        except Exception as e:
+            print(f"[ORDER] Error creando directorio: {e}")
+            return False
