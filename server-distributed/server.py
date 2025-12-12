@@ -1,5 +1,7 @@
 import os
 import time
+from ftp.server_core import start_ftp_server, PORT, SERVER_ROOT
+from ftp.sidecar import start_sidecar, get_global_bully
 
 if __name__ == "__main__":
     
@@ -15,6 +17,10 @@ if __name__ == "__main__":
     node_id = os.environ.get('NODE_ID', 'unknown')
     print(f"--- Iniciando Nodo FTP Distribuido (ID: {node_id}) ---")
     print("------------------------------------------------")
+
+    # 1. INICIAR SIDECAR (Discovery + Cluster Comm)
+    cluster_comm = start_sidecar()
+    time.sleep(5)
 
     try:
         # Solo en sistemas tipo Unix existe geteuid
