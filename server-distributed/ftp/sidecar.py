@@ -847,3 +847,76 @@ def handle_replica_success(message):
                         print(f"[LIDER] Réplica añadida: {node_ip} para {path}")
         
         return {'status': 'ok'}
+
+# --- HILOS SECUNDARIOS ---
+
+def update_ips_callback(new_ips):
+        global _cluster_comm_global, _bully_instance
+        
+        old_ips = set(_cluster_comm_global.cluster_ips)
+        new_ips_set = set(new_ips)
+        
+        added_ips = new_ips_set - old_ips
+        removed_ips = old_ips - new_ips_set
+        
+        _cluster_comm_global.update_cluster_ips(new_ips)
+        _bully_instance.update_nodes(new_ips)
+        
+        # Si soy líder, gestionar fallos de nodos
+        if _bully_instance and _bully_instance.am_i_leader():
+            # Para cada nodo que ha salido, manejar su falla
+            for failed_ip in removed_ips:
+                print(f"[SIDECAR] Nodo {failed_ip} ha salido del cluster, iniciando recuperación...")
+                handle_node_failure(failed_ip)
+            
+            # Para cada nodo que ha entrado, verificar si necesita réplicas
+            for new_ip in added_ips:
+                print(f"[SIDECAR] Nodo {new_ip} ha entrado, verificando réplicas necesarias...")
+                # Llamar a la función correcta
+                handle_node_join(new_ip)
+        
+        if added_ips:
+            print(f"[SIDECAR] Nodos añadidos: {added_ips}")
+        if removed_ips:
+            print(f"[SIDECAR] Nodos removidos: {removed_ips}")
+
+def start_replication_checker():
+        """Verifica periódicamente el estado de replicación."""
+        while True:
+            time.sleep(60)  # Verificar cada 60 segundos
+            
+            if _bully_instance and _bully_instance.am_i_leader():
+                ops = get_leader_operations()
+                if ops:
+                    ops.check_replication_status()
+
+def start_periodic_zombie_cleanup():
+    """
+    Ejecuta garbage collection completo cada 5 minutos.
+    Esto limpia archivos y directorios obsoletos en TODO el cluster.
+    """
+    while True:
+        time.sleep(300)  # 5 minutos
+        
+        if _bully_instance and _bully_instance.am_i_leader():
+            # Verificar que no estamos reconstruyendo
+            if _bully_instance.is_reconstructing():
+                print("[SIDECAR] GC diferido: Líder aún reconstruyendo estado")
+                continue
+            
+            print("[SIDECAR] Ejecutando garbage collection periódico global...")
+            
+            try:
+                from ftp.leader_operations import get_leader_operations
+                ops = get_leader_operations()
+                
+                if ops:
+                    ops.run_garbage_collection()
+                else:
+                    print("[SIDECAR] No se pudo obtener LeaderOperations para GC")
+                    
+            except Exception as e:
+                print(f"[SIDECAR] Error en garbage collection periódico: {e}")
+                import traceback
+                traceback.print_exc()
+
