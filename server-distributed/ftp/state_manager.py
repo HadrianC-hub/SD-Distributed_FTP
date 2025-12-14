@@ -302,16 +302,15 @@ class StateManager:
         return local_files
 
     def analyze_node_state(self, node_logs: List[Dict], node_ip: str, 
-                      disk_scan: Dict[str, Dict] = None,
-                      safe_mode: bool = True) -> Dict:
-
+                      disk_scan: Dict[str, Dict] = None) -> Dict:
+        """
+        Nueva versión simplificada: Solo detecta archivos faltantes o desactualizados.
+        No elimina nada del disco - solo reporta lo que debe ser sincronizado.
+        """
         with self.lock:
             # 1. Reconstruir estado desde el log del nodo
             node_state_from_log = {}
             sorted_logs = sorted(node_logs, key=lambda x: x.get('timestamp', 0))
-            
-            # Track de renombrados para detectar rutas obsoletas
-            rename_history = []
             
             for entry_data in sorted_logs:
                 entry = LogEntry.from_dict(entry_data)
@@ -329,83 +328,15 @@ class StateManager:
                     if old in node_state_from_log:
                         node_state_from_log[entry.path] = node_state_from_log[old]
                         del node_state_from_log[old]
-                    rename_history.append((old, entry.path, entry.timestamp))
 
             # 2. Si tenemos escaneo de disco, usar ESE como fuente de verdad
             node_state = disk_scan if disk_scan else node_state_from_log
             
             inconsistencies = []
-            zombies_found = 0
             
             print(f"[ANALYZE] Analizando nodo {node_ip} con {len(node_state)} elementos en disco")
             
-            # Definir rutas críticas
-            server_root = os.environ.get('SERVER_ROOT', '/app/server/data')
-            users_root = os.path.join(server_root, 'root')
-            
-            # 3. DETECCIÓN DE ZOMBIES
-            for path, info in node_state.items():
-                global_info = self.file_map.get(path)
-                
-                # --- PROTECCIÓN CRÍTICA DE DIRECTORIOS ---
-                is_system_root = (path == users_root or path.endswith('/root'))
-                
-                # Verificar si es un directorio de usuario (hijo directo de root)
-                # Ejemplo: /app/server/data/root/adrian -> dirname es .../root
-                is_user_home = False
-                if not is_system_root:
-                    parent_dir = os.path.dirname(path)
-                    # Normalizamos para evitar problemas con slashes finales
-                    if os.path.normpath(parent_dir) == os.path.normpath(users_root):
-                        is_user_home = True
-
-                if is_system_root or is_user_home:
-                    # Si no está en el esquema global, LO AGREGAMOS en lugar de borrarlo
-                    if not global_info:
-                        print(f"[ANALYZE] Directorio protegido detectado en disco pero no en memoria: {path}")
-                        self.file_map[path] = {
-                            'type': 'dir',
-                            'mtime': info.get('mtime', time.time()),
-                            'replicas': [node_ip],
-                            'created_by': 'system_recovery'
-                        }
-                        print(f"[ANALYZE] {path} reintegrado al esquema global automáticamente.")
-                    else:
-                        # Asegurar que el nodo esté en la lista de réplicas
-                        if node_ip not in global_info.get('replicas', []):
-                            global_info['replicas'].append(node_ip)
-                    
-                    # Saltamos cualquier lógica de borrado para estas carpetas
-                    continue
-                # -----------------------------------------
-                
-                # Caso 1: No existe en el esquema global (Y no es protegido)
-                if not global_info:
-                    inconsistencies.append({
-                        'command': 'DELETE_DIR_RECURSIVE' if info['type'] == 'dir' else 'DELETE_FILE',
-                        'path': path,
-                        'reason': 'zombie_not_in_global_state',
-                        'priority': 1
-                    })
-                    zombies_found += 1
-                    print(f"[ANALYZE] Zombie detectado: {path} (no en esquema global)")
-                    continue
-                
-                # Caso 2: Es archivo y el nodo NO es réplica
-                if info['type'] == 'file':
-                    replicas = global_info.get('replicas', [])
-                    if node_ip not in replicas:
-                        inconsistencies.append({
-                            'command': 'DELETE_FILE',
-                            'path': path,
-                            'reason': 'zombie_replica_relocated',
-                            'was_moved_to': replicas,
-                            'priority': 1
-                        })
-                        zombies_found += 1
-                        print(f"[ANALYZE] Zombie detectado: {path} (no es réplica)")
-
-            # 4. DETECCIÓN DE FALTANTES (lógica sin cambios...)
+            # 3. DETECCIÓN DE FALTANTES Y DESACTUALIZADOS (solo detectar, no borrar)
             for path, global_info in self.file_map.items():
                 if global_info.get('type') == 'file':
                     replicas = global_info.get('replicas', [])
@@ -445,7 +376,6 @@ class StateManager:
                 'inconsistencies': inconsistencies,
                 'node_state_summary': {
                     'items_count': len(node_state),
-                    'zombies_found': zombies_found,
                     'used_disk_scan': disk_scan is not None
                 }
             }
