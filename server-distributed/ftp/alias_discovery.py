@@ -32,9 +32,9 @@ class AliasServiceDiscovery:
                     if should_log:
                         print(f"[ALIAS-DISCOVERY] Estado del cluster: {len(new_ips)} nodos -> {sorted(new_ips)}")
                     if added:
-                        print(f"[ALIAS-DISCOVERY] Nodos añadidos: {added}")
+                        print(f"  - Nodos añadidos: {added}")
                     if removed:
-                        print(f"[ALIAS-DISCOVERY] Nodos removidos: {removed}")
+                        print(f"  - Nodos removidos: {removed}")
 
                     # Actualizar último estado loggeado
                     if should_log:
@@ -44,10 +44,7 @@ class AliasServiceDiscovery:
 
                 # Llamar al callback si hay cambios y está configurado
                 if self.ips_change_callback and (added or removed or attempt == 0):
-                    try:
-                        self.ips_change_callback(list(new_ips))
-                    except Exception as e:
-                        print(f"[ALIAS-DISCOVERY] Error en callback: {e}")
+                    self.ips_change_callback(list(new_ips))
 
                 attempt += 1
 
@@ -76,21 +73,15 @@ class AliasServiceDiscovery:
                 # Filtrar IPs vacías o inválidas
                 valid_ips = [ip for ip in ips if ip and ip != '127.0.0.1']
                 return set(valid_ips)
-            
-            except socket.gaierror as e:
-                if "Name or service not known" not in str(e):
-                    print(f"[ALIAS-DISCOVERY] Error resolviendo alias '{self.cluster_alias}' (intento {attempt + 1}/{max_retries}): {e}")
+            except:
+                print(f"[ERROR][ALIAS-DISCOVERY] Error inesperado resolviendo alias (intento {attempt + 1}/{max_retries})")
                 if attempt == max_retries - 1:
                     return set()
-            except Exception as e:
-                print(f"[ALIAS-DISCOVERY] Error inesperado resolviendo alias (intento {attempt + 1}/{max_retries}): {e}")
-                if attempt == max_retries - 1:
-                    return set()
-            
+                
             # Esperar antes de reintentar
             if attempt < max_retries - 1:
                 time.sleep(2)
-        
+
         return set()
 
     def set_ips_change_callback(self, callback):
@@ -101,20 +92,6 @@ class AliasServiceDiscovery:
         """Retorna todas las IPs del cluster descubiertas"""
         with self.lock:
             return list(self.discovered_ips)
-    
-    def get_cluster_size(self):
-        """Retorna el número de nodos en el cluster"""
-        with self.lock:
-            return len(self.discovered_ips)
-
-    def _resolve_dns(self, name):
-        try:
-            return set(
-                ip for ip in socket.gethostbyname_ex(name)[2]
-                if ip and ip != "127.0.0.1"
-            )
-        except socket.gaierror:
-            return set()
 
 # Singleton global
 _alias_discovery_instance = None

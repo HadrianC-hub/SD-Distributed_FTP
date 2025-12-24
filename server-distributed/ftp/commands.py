@@ -12,13 +12,11 @@ from ftp.sidecar import get_global_bully, get_global_cluster_comm
 from ftp.leader_operations import process_local_leader_request
 
 failed_attempts = {}        # Diccionario de intentos fallidos de login por IP
-MAX_FAILED_ATTEMPTS = 3     # Límite de intentos fallidos y tiempo de bloqueo
+MAX_FAILED_ATTEMPTS = 3     # Lí­mite de intentos fallidos y tiempo de bloqueo
 BLOCK_TIME = 300            # Tiempo de bloqueo de IP
 BUFFER_SIZE = 65536         # Tamaño máximo del buffer
 
-# Variables globales añadidas
-active_operations = {}  # operation_id -> información de operación
-operation_lock = threading.Lock()
+# Variables globales para Append
 active_delta_transfers = {}
 delta_lock = threading.Lock()
 
@@ -96,6 +94,137 @@ def REIN(session):
     session.current_dir = os.path.abspath(SERVER_ROOT)
     session.client_socket.send(b"220 Service ready for new user.\r\n")
 
+def TYPE(arg, session):
+    if not arg:
+        session.client_socket.send(b"501 Syntax error.\r\n")
+        return
+    a = arg.upper()
+    if a == 'A':
+        session.type = 'A'
+        session.client_socket.send(b"200 Type set to ASCII.\r\n")
+    elif a == 'I':
+        session.type = 'I'
+        session.client_socket.send(b"200 Type set to Binary.\r\n")
+    else:
+        session.client_socket.send(b"501 Syntax error.\r\n")
+
+def MODE(arg, session):
+    if not arg:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+        return
+    a = arg.upper()
+    if a in ('S','B','C'):
+        session.mode = a
+        session.client_socket.send(b"200 Mode set.\r\n")
+    else:
+        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
+
+def SYST(session):
+    session.client_socket.send(b"215 UNIX Type: L8\r\n")
+
+def STAT(arg, session):
+    session.client_socket.send(b"211 Status OK.\r\n")
+
+def HELP(arg, session):
+    # Mensajes simplificados
+    help_msg = "214-The following commands are recognized:\r\n" \
+               "USER PASS CWD CDUP QUIT REIN PORT PASV TYPE MODE" \
+               "RETR STOR APPE STOU LIST NLST STAT NOOP HELP PWD MKD RMD DELE RNFR RNTO\r\n" \
+               "214 End of help message.\r\n"
+    session.client_socket.send(help_msg.encode())
+
+def NOOP(session):
+    session.client_socket.send(b"200 NOOP command successful.\r\n")
+
+def PASV(session, data_port_range=(21000, 21100)):
+    """
+    Abre un listener PASV, lo guarda en session.passive_listener y envía la 227.
+    No hace accept() aquí­ â€” accept_passive_connection(session) lo hará luego.
+    """
+    min_p, max_p = data_port_range
+    ports = list(range(min_p, max_p + 1))
+    random.shuffle(ports)
+
+    # cerrar listener antiguo si existe
+    if session.passive_listener:
+        try:
+            session.passive_listener.close()
+        except: pass
+        session.passive_listener = None
+
+    listener = None
+    chosen_port = None
+    for p in ports:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(('', p))     # escuchar en todas las interfaces
+            s.listen(1)
+            listener = s
+            chosen_port = p
+            break
+        except Exception:
+            continue
+
+    if listener is None:
+        session.client_socket.sendall(b'421 PASV failed.\r\n')
+        print("[PASV] No se pudo abrir puerto en el rango PASV.")
+        return
+
+    # Calcular IP anunciada (usar socket de control para obtener IP real)
+    server_ip = get_advertised_ip_for_session(session.client_socket)
+    print(f"[PASV] anunciando {server_ip}:{chosen_port} (listener en 0.0.0.0:{chosen_port})")
+    ip_parts = server_ip.split('.')
+    p1, p2 = chosen_port // 256, chosen_port % 256
+    resp = f"227 Entering Passive Mode ({ip_parts[0]},{ip_parts[1]},{ip_parts[2]},{ip_parts[3]},{p1},{p2}).\r\n"
+    session.client_socket.sendall(resp.encode())
+    # Guardar listener en la sesión para que accept_passive_connection lo use después
+    session.passive_listener = listener
+    # NOTA: no hacemos accept() aquí­
+    return
+
+def PORT(arg, session):
+    """
+    Comando PORT: El cliente nos dice a dónde conectarnos para enviar datos.
+    Formato: h1,h2,h3,h4,p1,p2
+    """
+    if not arg:
+        session.client_socket.send(b"501 Syntax error.\r\n")
+        return
+
+    parts = arg.strip().split(',')
+    if len(parts) != 6:
+        session.client_socket.send(b"501 Syntax error.\r\n")
+        return
+
+    try:
+        # Reconstruir IP y Puerto
+        ip_address = '.'.join(parts[:4])
+        port = int(parts[4]) * 256 + int(parts[5])
+        
+        print(f"[PORT] Cliente solicita conexión activa a {ip_address}:{port}")
+
+        # Cerrar socket anterior si existe
+        close_data_socket(session)
+
+        # Crear socket y conectar activamente
+        dsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        dsock.settimeout(10) # Timeout para la conexión
+        dsock.connect((ip_address, port))
+        
+        session.data_socket = dsock
+        session.client_socket.send(b"200 PORT command successful.\r\n")
+        
+    except Exception as e:
+        print(f"[PORT] Error conectando al cliente: {e}")
+        session.client_socket.send(b"425 Can't open data connection.\r\n")
+
+def ABOR(session):
+    close_data_socket(session)
+    session.client_socket.sendall(b"426 Aborted.\r\n")
+
+# --- COMANDOS DE CLUSTER ---
+
 def PWD(session):
     """Consulta al líder para obtener la ruta lógica actual."""
     if not session.authenticated:
@@ -131,6 +260,7 @@ def PWD(session):
 
 def CWD(arg, session):
     """Cambia el directorio consultando al líder."""
+
     if not session.authenticated:
         session.client_socket.send(b"530 Not logged in.\r\n")
         return
@@ -258,7 +388,7 @@ def MKD(arg, session):
             register_local_operation(operation_id, 'MKD', target_path, session.username)
             
         except Exception as e:
-            print(f"[MKD] Error creating directory: {e}")
+            print(f"[ERROR][MKD] Error creating directory: {e}")
             session.client_socket.send(b"550 Failed to create directory.\r\n")
     else:
         session.client_socket.send(b"550 Unexpected response from leader.\r\n")
@@ -285,7 +415,7 @@ def RMD(arg, session):
         session.client_socket.send(b"550 Access denied.\r\n")
         return
     
-    # NO ejecutar localmente aquí - el líder coordinará el borrado en todos los nodos
+    # NO ejecutar localmente aquí­ - el líder coordinará el borrado en todos los nodos
     response = ask_leader('RMD', {
         'path': target_path,
         'requester': cluster_comm.local_ip,
@@ -339,45 +469,6 @@ def DELE(arg, session):
     
     # El líder ha coordinado la eliminación en todos los nodos
     session.client_socket.send(f"250 Deleted {arg}.\r\n".encode())
-
-def TYPE(arg, session):
-    if not arg:
-        session.client_socket.send(b"501 Syntax error.\r\n")
-        return
-    a = arg.upper()
-    if a == 'A':
-        session.type = 'A'
-        session.client_socket.send(b"200 Type set to ASCII.\r\n")
-    elif a == 'I':
-        session.type = 'I'
-        session.client_socket.send(b"200 Type set to Binary.\r\n")
-    else:
-        session.client_socket.send(b"501 Syntax error.\r\n")
-
-def MODE(arg, session):
-    if not arg:
-        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
-        return
-    a = arg.upper()
-    if a in ('S','B','C'):
-        session.mode = a
-        session.client_socket.send(b"200 Mode set.\r\n")
-    else:
-        session.client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
-
-def SYST(session):
-    session.client_socket.send(b"215 UNIX Type: L8\r\n")
-
-def STAT(arg, session):
-    session.client_socket.send(b"211 Status OK.\r\n")
-
-def HELP(arg, session):
-    # Mensajes simplificados
-    help_msg = "214-The following commands are recognized:\r\n" \
-               "USER PASS CWD CDUP QUIT REIN PORT PASV TYPE MODE" \
-               "RETR STOR APPE STOU LIST NLST STAT NOOP HELP PWD MKD RMD DELE RNFR RNTO\r\n" \
-               "214 End of help message.\r\n"
-    session.client_socket.send(help_msg.encode())
 
 def RNFR(arg, session):
     """Solicita renombrar un archivo/directorio al líder."""
@@ -498,94 +589,6 @@ def RNTO(arg, session):
     
     session.client_socket.send(b"250 Rename successful.\r\n")
 
-def NOOP(session):
-    session.client_socket.send(b"200 NOOP command successful.\r\n")
-
-def PASV(session, data_port_range=(21000, 21100)):
-    """
-    Abre un listener PASV, lo guarda en session.passive_listener y envía la 227.
-    No hace accept() aquí — accept_passive_connection(session) lo hará luego.
-    """
-    min_p, max_p = data_port_range
-    ports = list(range(min_p, max_p + 1))
-    random.shuffle(ports)
-
-    # cerrar listener antiguo si existe
-    if session.passive_listener:
-        try:
-            session.passive_listener.close()
-        except: pass
-        session.passive_listener = None
-
-    listener = None
-    chosen_port = None
-    for p in ports:
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(('', p))     # escuchar en todas las interfaces
-            s.listen(1)
-            listener = s
-            chosen_port = p
-            break
-        except Exception:
-            continue
-
-    if listener is None:
-        session.client_socket.sendall(b'421 PASV failed.\r\n')
-        print("[PASV] No se pudo abrir puerto en el rango PASV.")
-        return
-
-    # Calcular IP anunciada (usar socket de control para obtener IP real)
-    server_ip = get_advertised_ip_for_session(session.client_socket)
-    print(f"[PASV] anunciando {server_ip}:{chosen_port} (listener en 0.0.0.0:{chosen_port})")
-    ip_parts = server_ip.split('.')
-    p1, p2 = chosen_port // 256, chosen_port % 256
-    resp = f"227 Entering Passive Mode ({ip_parts[0]},{ip_parts[1]},{ip_parts[2]},{ip_parts[3]},{p1},{p2}).\r\n"
-    session.client_socket.sendall(resp.encode())
-    # Guardar listener en la sesión para que accept_passive_connection lo use después
-    session.passive_listener = listener
-    # NOTA: no hacemos accept() aquí
-    return
-
-def PORT(arg, session):
-    """
-    Comando PORT: El cliente nos dice a dónde conectarnos para enviar datos.
-    Formato: h1,h2,h3,h4,p1,p2
-    """
-    if not arg:
-        session.client_socket.send(b"501 Syntax error.\r\n")
-        return
-
-    parts = arg.strip().split(',')
-    if len(parts) != 6:
-        session.client_socket.send(b"501 Syntax error.\r\n")
-        return
-
-    try:
-        # Reconstruir IP y Puerto
-        ip_address = '.'.join(parts[:4])
-        port = int(parts[4]) * 256 + int(parts[5])
-        
-        print(f"[PORT] Cliente solicita conexión activa a {ip_address}:{port}")
-
-        # Cerrar socket anterior si existe
-        close_data_socket(session)
-
-        # Crear socket y conectar activamente
-        dsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        dsock.settimeout(10) # Timeout para la conexión
-        dsock.connect((ip_address, port))
-        
-        session.data_socket = dsock
-        session.client_socket.send(b"200 PORT command successful.\r\n")
-        
-    except Exception as e:
-        print(f"[PORT] Error conectando al cliente: {e}")
-        session.client_socket.send(b"425 Can't open data connection.\r\n")
-
-# --- TRANSFERENCIAS ---
-
 def RETR(arg, session):
     if not arg:
         session.client_socket.send(b"501 Syntax error.\r\n")
@@ -654,7 +657,7 @@ def RETR(arg, session):
                     os.remove(temp_path)
                 except: pass
             else:
-                print(f"[RETR] Error descargando de nodo remoto: {msg}")
+                print(f"[ERROR][RETR] Error descargando de nodo remoto: {msg}")
 
         # 5. Cerrar conexión de datos
         close_data_socket(session)
@@ -668,7 +671,7 @@ def RETR(arg, session):
                     'session_user': session.username
                 })
             except Exception as e:
-                print(f"[RETR] Error liberando lock: {e}")
+                print(f"[ERROR][RETR] Error liberando lock: {e}")
         
         threading.Thread(target=release_lock_async, daemon=True).start()
 
@@ -679,7 +682,7 @@ def RETR(arg, session):
             session.client_socket.send(b"450 Transfer failed.\r\n")
 
     except Exception as e:
-        print(f"[RETR] Excepción crítica: {e}")
+        print(f"[ERROR][RETR] Excepción crítica: {e}")
         import traceback
         traceback.print_exc()
         close_data_socket(session)
@@ -823,11 +826,16 @@ def APPE(arg, session):
             session.client_socket.send(b"550 Cluster not available.\r\n")
             return
             
+        # Obtener partition_epoch ACTUAL
+        state_mgr = get_state_manager()
+        current_partition_epoch = state_mgr.partition_epoch
+
         response = ask_leader('APPE', {
             'path': target_path,
             'size': delta_size,
             'requester': cluster_comm.local_ip,
-            'session_user': session.username
+            'session_user': session.username,
+            'partition_epoch': current_partition_epoch
         })
         
         if response.get('status') != 'ok':
@@ -889,7 +897,7 @@ def APPE(arg, session):
             try:
                 os.remove(delta_filename)
             except Exception as e:
-                print(f"[APPE] Error eliminando delta: {e}")
+                print(f"[ERROR][APPE] Error eliminando delta: {e}")
         
         # Notificar al líder que la operación del cliente terminó
         notify_leader_completion(operation_id, True, session)
@@ -903,9 +911,9 @@ def APPE(arg, session):
                     'session_user': session.username
                 })
                 if release_response.get('status') != 'ok':
-                    print(f"[APPE] ⚠️ Fallo liberación de lock: {release_response.get('message')}")
+                    print(f"[ERROR][APPE] Fallo liberación de lock: {release_response.get('message')}")
         except Exception as e:
-            print(f"[APPE] Error al liberar lock: {e}")
+            print(f"[ERROR][APPE] Error al liberar lock: {e}")
 
         session.client_socket.sendall(b"226 Append successful.\r\n")
 
@@ -967,7 +975,7 @@ def LIST(session):
         close_data_socket(session)
         session.client_socket.sendall(b"226 Transfer complete.\r\n")
     except Exception as e:
-        print(f"[LIST] Error sending list: {e}")
+        print(f"[ERROR][LIST] Error sending list: {e}")
         close_data_socket(session)
         session.client_socket.sendall(b"451 Requested action aborted: local error in processing.\r\n")
 
@@ -1010,13 +1018,9 @@ def NLST(session):
         close_data_socket(session)
         session.client_socket.sendall(b"226 Transfer complete.\r\n")
     except Exception as e:
-        print(f"[NLST] Error sending names: {e}")
+        print(f"[ERROR][NLST] Error sending names: {e}")
         close_data_socket(session)
         session.client_socket.sendall(b"451 Requested action aborted: local error in processing.\r\n")
-
-def ABOR(session):
-    close_data_socket(session)
-    session.client_socket.sendall(b"426 Aborted.\r\n")
 
 # --- UTILIDADES ---
 
@@ -1157,10 +1161,11 @@ def register_local_operation(operation_id, op_type, path, username):
         metadata = {
             'operation_id': operation_id,
             'user': username,
-            'local_only': True
+            'local_only': True,
+            'partition_epoch': state_mgr.partition_epoch
         }
         state_mgr.append_operation(op_type, path, metadata)
-        print(f"[REGISTER] Operación {op_type} registrada localmente para {path}")
+        print(f"[REGISTER] Operación {op_type} registrada (epoch={state_mgr.partition_epoch}) para {path}")
 
 def notify_leader_completion(operation_id, success, session):
     """Notifica al líder que una operación ha finalizado."""
@@ -1264,7 +1269,7 @@ def register_delta_transfer(delta_file, target_nodes):
             'lock': threading.Lock(),
             'created_at': time.time()
         }
-        print(f"[DELTA] Registrado: {delta_file} → {target_nodes}")
+        print(f"[DELTA] Registrado: {delta_file} â†’ {target_nodes}")
 
 def confirm_delta_transfer(delta_file, node_ip):
     """
@@ -1273,7 +1278,7 @@ def confirm_delta_transfer(delta_file, node_ip):
     """
     with delta_lock:
         if delta_file not in active_delta_transfers:
-            print(f"[DELTA] Delta {delta_file} ya no está registrado")
+            print(f"[ERROR][DELTA] Delta {delta_file} ya no está registrado")
             return True  # Ya fue limpiado
         
         transfer_info = active_delta_transfers[delta_file]
@@ -1298,47 +1303,57 @@ def cleanup_delta_safe(delta_file, target_nodes, timeout=90):
     """
     print(f"[DELTA-CLEANUP] Iniciando limpieza de {delta_file}")
     print(f"[DELTA-CLEANUP] Esperando confirmación de {len(target_nodes)} nodos: {target_nodes}")
-    
+
     start_time = time.time()
-    last_check = start_time
-    
-    while time.time() - start_time < timeout:
-        # Verificar cada segundo
-        time.sleep(1)
-        
-        # Log cada 10 segundos
-        if time.time() - last_check >= 10:
-            with delta_lock:
-                if delta_file in active_delta_transfers:
-                    pending = active_delta_transfers[delta_file]['nodes']
-                    elapsed = int(time.time() - start_time)
-                    print(f"[DELTA-CLEANUP] {delta_file}: {len(pending)} nodos pendientes después de {elapsed}s: {pending}")
-                last_check = time.time()
-        
-        # Verificar si ya se completó
+    last_log_time = start_time
+    completed = False
+
+    while True:
+        elapsed = time.time() - start_time
+
+        # Â¿Timeout?
+        if elapsed >= timeout:
+            break
+
+        # Â¿Ya completado?
         with delta_lock:
             if delta_file not in active_delta_transfers:
                 print(f"[DELTA-CLEANUP] Todas las confirmaciones recibidas para {delta_file}")
+                completed = True
                 break
-    else:
-        # Timeout alcanzado
+
+            # Log periódico
+            if time.time() - last_log_time >= 10:
+                entry = active_delta_transfers.get(delta_file)
+                if entry:
+                    pending = entry.get('nodes', [])
+                    print(
+                        f"[DELTA-CLEANUP] {delta_file}: "
+                        f"{len(pending)} nodos pendientes después de {int(elapsed)}s: {pending}"
+                    )
+                last_log_time = time.time()
+
+        time.sleep(1)
+
+    # Timeout alcanzado
+    if not completed:
         with delta_lock:
-            if delta_file in active_delta_transfers:
-                pending = active_delta_transfers[delta_file]['nodes']
+            entry = active_delta_transfers.get(delta_file)
+            if entry:
+                pending = entry.get('nodes', [])
                 print(f"[DELTA-CLEANUP] TIMEOUT ({timeout}s) alcanzado para {delta_file}")
                 print(f"[DELTA-CLEANUP] Nodos que nunca confirmaron: {pending}")
-                # Forzar limpieza del registro
                 del active_delta_transfers[delta_file]
-    
-    # Eliminar archivo físico
+
+    # Eliminación fí­sica del archivo
     if os.path.exists(delta_file):
         try:
             os.remove(delta_file)
             print(f"[DELTA-CLEANUP] Archivo delta eliminado: {delta_file}")
         except Exception as e:
-            print(f"[DELTA-CLEANUP] Error eliminando {delta_file}: {e}")
+            print(f"[ERROR][DELTA-CLEANUP] Error eliminando {delta_file}: {e}")
     else:
-        print(f"[DELTA-CLEANUP] Delta {delta_file} ya no existe")
+        print(f"[ERROR][DELTA-CLEANUP] Delta {delta_file} ya no existe")
 
 def order_operation_to_nodes(command, path, nodes, operation_id):
     """Ordena a otros nodos que ejecuten una operación."""
@@ -1360,9 +1375,9 @@ def order_operation_to_nodes(command, path, nodes, operation_id):
             }
             
             if command == 'DELETE_DIR':
-                message['check_empty'] = True  # Añade flag para verificar vacío
+                message['check_empty'] = True  # Añade flag para verificar vací­o
             
             cluster_comm.send_message(node_ip, message, expect_response=False)
             print(f"[ORDER] Sent {command} for {path} to {node_ip}")
         except Exception as e:
-            print(f"[ORDER] Error sending to {node_ip}: {e}")
+            print(f"[ERROR][ORDER] Error sending to {node_ip}: {e}")

@@ -106,7 +106,7 @@ def show_temp_message(message, type="info", duration=3):
     elif type == "error":
         st.error(f"❌ {message}")
     elif type == "warning":
-        st.warning(f"⚠️ {message}")
+        st.warning(f"{message}")
     else:
         st.info(f"ℹ️ {message}")
     
@@ -299,7 +299,7 @@ def add_file_to_stou_list():
         return
     
     if file_path in st.session_state.stou_multiple_files:
-        st.warning("⚠️ El archivo ya está en la lista")
+        st.warning("El archivo ya está en la lista")
     else:
         st.session_state.stou_multiple_files.append(file_path)
         st.success(f"✅ Archivo agregado: {os.path.basename(file_path)}")
@@ -406,9 +406,9 @@ def store_recursive(ftp_socket, local_path, remote_base_path=""):
                 mkdir_response = client.generic_command_by_type(ftp_socket, remote_dir_path, command="MKD", command_type='A')
                 if not mkdir_response.startswith('2'):
                     # El directorio podría ya existir, continuar
-                    log_message(f"⚠️ No se pudo crear directorio {remote_dir_path}: {mkdir_response}")
+                    log_message(f"No se pudo crear directorio {remote_dir_path}: {mkdir_response}")
             except Exception as e:
-                log_message(f"⚠️ Error creando directorio {remote_dir_path}: {e}")
+                log_message(f"Error creando directorio {remote_dir_path}: {e}")
             
             # Recorrer el contenido del directorio local
             for item in os.listdir(local_path):
@@ -898,7 +898,7 @@ def download_directory_recursive(ftp_client, remote_dir, local_base_path):
                 success, _ = change_dir(ftp_client, "..")
                 if not success:
                     # Si falla con "..", intentar volver al directorio guardado
-                    log_message(f"⚠️ No se pudo volver al directorio padre")
+                    log_message(f"No se pudo volver al directorio padre")
 
         if errors:
             return False, f"Descarga parcial. Archivos: {downloaded_files}, Carpetas: {downloaded_dirs}. Errores: {len(errors)}"
@@ -1408,7 +1408,7 @@ def force_binary_type(ftp_client):
             st.session_state.transfer_type = 'I'
             client.TYPE = 'I'
         except Exception as e:
-            log_message(f"⚠️ No se pudo cambiar a binario: {e}")
+            log_message(f"No se pudo cambiar a binario: {e}")
     else:
         log_message("ℹ️ Modo binario forzado desactivado, usando tipo actual")
 
@@ -1823,7 +1823,7 @@ if st.session_state.ftp_client:
                     st.info(f"📄 Archivo a subir: {os.path.basename(upload_path)}")
                 else:
                     st.info(f"📁 Carpeta a subir: {os.path.basename(upload_path)}")
-                    st.warning("⚠️ Se subirá toda la carpeta y su contenido recursivamente")
+                    st.warning("Se subirá toda la carpeta y su contenido recursivamente")
             else:
                 st.error("❌ La ruta no existe")
         
@@ -1895,7 +1895,7 @@ if st.session_state.ftp_client:
         remote_name, item_type = st.session_state.append_candidate
         
         st.info(f"Append al archivo remoto: '{remote_name}'")
-        st.warning("⚠️ El contenido del archivo local se agregará al final del archivo remoto.")
+        st.warning("El contenido del archivo local se agregará al final del archivo remoto.")
         
         local_path = st.text_input(
             "Ruta local del archivo a appendear:",
@@ -1927,7 +1927,7 @@ if st.session_state.ftp_client:
         
         # Mostrar advertencia especial para carpetas
         if item_type == "dir":
-            st.warning(f"⚠️ **ADVERTENCIA**: Se eliminará la carpeta '{item_name}' y **TODO SU CONTENIDO** de forma permanente.")
+            st.warning(f"**ADVERTENCIA**: Se eliminará la carpeta '{item_name}' y **TODO SU CONTENIDO** de forma permanente.")
             st.error("🚨 **Esta acción no se puede deshacer**")
             st.info("📋 **Proceso**: Se eliminarán primero todos los archivos, luego las subcarpetas, y finalmente la carpeta principal.")
         else:
@@ -1952,7 +1952,7 @@ if st.session_state.ftp_client:
         st.info(f"¿Descargar el {item_type_str} '{item_name}' a '{st.session_state.download_path}'?")
         
         if item_type == "dir":
-            st.warning("⚠️ La descarga de carpetas puede tomar tiempo dependiendo del contenido.")
+            st.warning("La descarga de carpetas puede tomar tiempo dependiendo del contenido.")
         
         col1, col2 = st.columns(2)
         with col1:
@@ -1968,7 +1968,7 @@ if st.session_state.ftp_client:
         item_name, item_type = st.session_state.download_port_candidate
         
         st.info(f"¿Descargar el archivo '{item_name}' usando el comando PORT (modo activo)?")
-        st.warning("⚠️ El modo PORT requiere que el servidor pueda conectarse a tu cliente. Esto puede no funcionar en todas las configuraciones de red.")
+        st.warning("El modo PORT requiere que el servidor pueda conectarse a tu cliente. Esto puede no funcionar en todas las configuraciones de red.")
         
         # Campos para configurar PORT
         col1, col2 = st.columns(2)

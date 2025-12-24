@@ -7,7 +7,7 @@ services:
     container_name: ftp_node_1
     command: python -u /app/server/server.py
     volumes:
-      - ./server:/app/server
+      - ./server-distributed:/app/server
       - ./storage_node_1:/app/server/data
     networks:
       shared-net:
@@ -30,7 +30,7 @@ services:
     container_name: ftp_node_2
     command: python -u /app/server/server.py
     volumes:
-      - ./server:/app/server
+      - ./server-distributed:/app/server
       - ./storage_node_2:/app/server/data
     networks:
       shared-net:
@@ -50,7 +50,7 @@ services:
     container_name: ftp_node_3
     command: python -u /app/server/server.py
     volumes:
-      - ./server:/app/server
+      - ./server-distributed:/app/server
       - ./storage_node_3:/app/server/data
     networks:
       shared-net:
@@ -70,7 +70,7 @@ services:
     container_name: ftp_node_4
     command: python -u /app/server/server.py
     volumes:
-      - ./server:/app/server
+      - ./server-distributed:/app/server
       - ./storage_node_4:/app/server/data
     networks:
       shared-net:
@@ -90,7 +90,7 @@ services:
     container_name: ftp_node_5
     command: python -u /app/server/server.py
     volumes:
-      - ./server:/app/server
+      - ./server-distributed:/app/server
       - ./storage_node_5:/app/server/data
     networks:
       shared-net:

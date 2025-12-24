@@ -1,7 +1,7 @@
 import os
 import time
 from ftp.server_core import start_ftp_server, PORT, SERVER_ROOT
-from ftp.sidecar import start_sidecar, get_global_bully
+from ftp.sidecar import start_sidecar
 
 if __name__ == "__main__":
     
@@ -18,8 +18,8 @@ if __name__ == "__main__":
     print(f"--- Iniciando Nodo FTP Distribuido (ID: {node_id}) ---")
     print("------------------------------------------------")
 
-    # 1. INICIAR SIDECAR (Discovery + Cluster Comm)
-    cluster_comm = start_sidecar()
+    # 1. INICIAR SIDECAR
+    cluster_comm = start_sidecar(node_id)
     time.sleep(5)
 
     try:

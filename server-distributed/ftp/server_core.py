@@ -117,18 +117,18 @@ def handle_client(client_socket, address):
         client_socket.close()
         return
 
-    print(f"Conexión establecida desde {address}")
+    print(f"[CORE] Conexión establecida desde {address}")
     client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     session.client_socket.send(b"220 FTP Server Ready\r\n")
 
     while True:
         try:
-            # aplicar timeout por actividad
+            # Aplicar timeout por actividad
             session.client_socket.settimeout(1.0)
             try:
                 data = session.client_socket.recv(BUFFER_SIZE)
             except socket.timeout:
-                # verificar inactividad
+                # Verificar inactividad
                 if time.time() - session.last_activity > INACTIVITY_TIMEOUT:
                     session.client_socket.send(b"421 Service timeout.\r\n")
                     break
@@ -140,18 +140,18 @@ def handle_client(client_socket, address):
             except Exception:
                 text = data.decode(errors='ignore')
             session.last_activity = time.time()
-            print(f"Comando recibido de {address}: {text.strip()}")
+            print(f"[CORE] Comando recibido de {address}: {text.strip()}")
             should_quit = handle_command_line(text, session)
             if should_quit:
                 break
         except ConnectionResetError:
             break
         except Exception as e:
-            # no queremos que un cliente nos tumbe todo el server
-            print(f"Error en client handler {address}: {e}")
+            # No queremos que un cliente nos tumbe todo el server
+            print(f"[ERROR][CORE] Error en client handler {address}: {e}")
             break
 
-    print(f"Conexión cerrada con {address}")
+    print(f"[CORE] Conexión cerrada con {address}")
     try:
         if session.passive_listener:
             session.passive_listener.close()

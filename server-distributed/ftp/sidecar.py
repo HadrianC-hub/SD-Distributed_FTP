@@ -1,31 +1,45 @@
 import os
-import shutil
 import threading
 import time
+from collections import defaultdict
 from ftp.alias_discovery import start_alias_discovery
 from ftp.cluster_comm import start_cluster_communication
 from ftp.state_manager import get_state_manager
 from ftp.bully_election import BullyElection
 from ftp.leader_operations import process_local_leader_request, get_leader_operations
-from ftp.node_transfer import get_node_transfer
 
 # Variables globales
 _cluster_comm_global = None
 _bully_instance = None
+_last_known_cluster_size = 0
+_nodes_being_integrated = set()
+_integration_lock = threading.Lock()
 
-def start_sidecar():
-    global _cluster_comm_global, _bully_instance
+# Cola de órdenes pendientes
+pending_orders_queue = []
+pending_orders_lock = threading.Lock()
+
+def start_sidecar(node_id):
+    global _cluster_comm_global, _bully_instance, _last_known_cluster_size
     print(">>> Iniciando Sidecar...")
-    node_id = os.environ.get('NODE_ID', 'unknown')
     
+    # Iniciando servicio de Alias-Discovery
     discovery = start_alias_discovery()
     initial_ips = discovery.get_cluster_ips()
+
+    # Iniciando comunicaciones entre nodos
     _cluster_comm_global = start_cluster_communication(node_id, initial_ips)
+
+    # Iniciando manejador de estado (logs de los nodos)
     state_mgr = get_state_manager(node_id)
 
     # Iniciar Bully
     local_ip = _cluster_comm_global.local_ip
     _bully_instance = BullyElection(node_id, local_ip, _cluster_comm_global, state_mgr)
+
+    # Iniciar servicio de transferencias entre nodos
+    from ftp.node_transfer import get_node_transfer
+    get_node_transfer(local_ip)
     
     # Registrar handlers
     _cluster_comm_global.register_handler('ELECTION', _bully_instance.handle_election_msg)
@@ -39,15 +53,15 @@ def start_sidecar():
     _cluster_comm_global.register_handler('REQUEST_DISK_SCAN', handle_request_disk_scan)
     _cluster_comm_global.register_handler('DELTA_CONFIRMATION', handle_delta_confirmation)
 
-    discovery.set_ips_change_callback(update_ips_callback)
-    if initial_ips: update_ips_callback(initial_ips)
     
-    get_node_transfer(local_ip) # Iniciar transfer server
+    discovery.set_ips_change_callback(update_ips_callback)
+    if initial_ips: 
+        _last_known_cluster_size = len(initial_ips)
+        update_ips_callback(initial_ips)
     
     if _bully_instance.am_i_leader():
         get_leader_operations(_cluster_comm_global, _bully_instance)
 
-    # Iniciar el verificador de replicación en un hilo separado
     threading.Thread(target=start_replication_checker, daemon=True).start()
 
     return _cluster_comm_global
@@ -77,22 +91,64 @@ def handle_fs_order(message):
         elif command == 'DELETE_DIR':
             try:
                 if os.path.exists(path) and os.path.isdir(path):
-                    # Verificar si está vacío
-                    if check_empty and os.listdir(path):
-                        return {'status': 'error', 'message': 'Directory not empty'}
+                    # MEJORADO: Eliminar recursivamente TODO el contenido
+                    print(f"[ORDER] Eliminando directorio completo: {path}")
                     
+                    # Listar todo el contenido antes de borrar
+                    files_inside = []
+                    dirs_inside = []
+                    
+                    for root, dirs, files in os.walk(path, topdown=False):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            files_inside.append(file_path)
+                        for dir_name in dirs:
+                            dir_path = os.path.join(root, dir_name)
+                            dirs_inside.append(dir_path)
+                    
+                    if files_inside or dirs_inside:
+                        print(f"[ORDER] Directorio contiene {len(files_inside)} archivos y {len(dirs_inside)} subdirectorios")
+                    
+                    # Eliminar archivos primero
+                    for file_path in files_inside:
+                        try:
+                            if os.path.exists(file_path):
+                                os.remove(file_path)
+                                print(f"[ORDER]  Archivo eliminado: {file_path}")
+                        except Exception as e:
+                            print(f"[ORDER]  Error eliminando archivo {file_path}: {e}")
+                    
+                    # Eliminar subdirectorios
+                    for dir_path in dirs_inside:
+                        try:
+                            if os.path.exists(dir_path) and os.path.isdir(dir_path):
+                                if not os.listdir(dir_path):  # Solo si está vací­o
+                                    os.rmdir(dir_path)
+                                    print(f"[ORDER]  Subdirectorio eliminado: {dir_path}")
+                        except Exception as e:
+                            print(f"[ORDER]  Error eliminando subdirectorio {dir_path}: {e}")
+                    
+                    # Verificar si quedó vací­o
+                    if check_empty and os.listdir(path):
+                        remaining = os.listdir(path)
+                        print(f"[ORDER]  Directorio no pudo vaciarse completamente. Quedan: {remaining}")
+                        return {'status': 'error', 'message': 'Directory not empty after cleanup'}
+                    
+                    # Finalmente eliminar el directorio principal
                     os.rmdir(path)
-                    print(f"[ORDER] Directorio eliminado: {path}")
+                    print(f"[ORDER]  Directorio principal eliminado: {path}")
                     
                     state_mgr.append_operation('RMD', path, {
                         'operation_id': operation_id,
                         'executed_by': _cluster_comm_global.local_ip,
-                        'from_order': True
+                        'from_order': True,
+                        'files_deleted': len(files_inside),
+                        'dirs_deleted': len(dirs_inside)
                     })
                     
-                    return {'status': 'ok', 'message': 'Directory deleted'}
+                    return {'status': 'ok', 'message': 'Directory deleted completely'}
                 else:
-                    # Idempotencia: Si ya no existe, damos OK
+                    # No existe, pero registrar que ya fue eliminado
                     state_mgr.append_operation('RMD', path, {
                         'operation_id': operation_id,
                         'executed_by': _cluster_comm_global.local_ip,
@@ -102,6 +158,8 @@ def handle_fs_order(message):
                     
             except Exception as e:
                 print(f"[ORDER] Error eliminando directorio {path}: {e}")
+                import traceback
+                traceback.print_exc()
                 return {'status': 'error', 'message': str(e)}
             
         elif command == 'APPEND_BLOCK':
@@ -116,7 +174,9 @@ def handle_fs_order(message):
                 print(f"[SIDECAR] Error APPEND: No tengo el archivo original {target_path}")
                 return {'status': 'error', 'message': 'Original file missing'}
             
-            # Descargar el delta
+            # Guardar tamaño y hash antes del append
+            size_before = os.path.getsize(target_path)
+            
             local_delta_temp = target_path + f".delta_incoming.{time.time()}"
             
             from ftp.node_transfer import get_node_transfer
@@ -129,7 +189,6 @@ def handle_fs_order(message):
             
             if success:
                 try:
-                    # Hacer append
                     print(f"[SIDECAR] Aplicando append en {target_path}...")
                     with open(target_path, 'ab') as target, open(local_delta_temp, 'rb') as delta:
                         while True:
@@ -137,12 +196,23 @@ def handle_fs_order(message):
                             if not chunk: break
                             target.write(chunk)
                     
-                    print(f"[SIDECAR] Append aplicado exitosamente en {target_path}")
+                    size_after = os.path.getsize(target_path)
+                    delta_applied = size_after - size_before
                     
-                    # Limpiar delta temporal
+                    print(f"[SIDECAR] Append aplicado exitosamente en {target_path}")
+                    print(f"[SIDECAR] Tamaño antes: {size_before}, después: {size_after}, delta: {delta_applied}")
+                    
                     os.remove(local_delta_temp)
                     
-                    # Enviar confirmación al nodo que envió la orden
+                    # Registrar en el log
+                    state_mgr.append_operation('APPE', target_path, {
+                        'delta_size': delta_applied,
+                        'from_order': True,
+                        'operation_id': operation_id,
+                        'source_node': delta_source,
+                        'final_size': size_after
+                    })
+                    
                     try:
                         confirmation_msg = {
                             'type': 'DELTA_CONFIRMATION',
@@ -150,7 +220,9 @@ def handle_fs_order(message):
                             'node_ip': _cluster_comm_global.local_ip,
                             'target_path': target_path,
                             'status': 'success',
-                            'timestamp': time.time()
+                            'timestamp': time.time(),
+                            'delta_applied': delta_applied,
+                            'final_size': size_after
                         }
                         
                         threading.Thread(
@@ -162,7 +234,7 @@ def handle_fs_order(message):
                     except Exception as e:
                         print(f"[SIDECAR] Error enviando confirmación: {e}")
                     
-                    return {'status': 'ok'}
+                    return {'status': 'ok', 'final_size': size_after}
                     
                 except Exception as e:
                     print(f"[SIDECAR] Error escribiendo append: {e}")
@@ -187,22 +259,18 @@ def handle_fs_order(message):
             print(f"[ORDER] RENAME recibido: {old_path} -> {new_path} (tipo: {item_type})")
             
             try:
-                # Para directorios, manejamos de forma especial
                 if is_directory:
                     success = _handle_directory_rename(old_path, new_path, operation_id)
                 else:
                     success = _handle_file_rename(old_path, new_path, operation_id, message)
                 
                 if success:
-                    # Actualizar nuestro state manager local
                     state_mgr = get_state_manager()
                     with state_mgr.lock:
-                        # Si tenemos entrada para el archivo/directorio viejo, moverla
                         if old_path in state_mgr.file_map:
                             state_mgr.file_map[new_path] = state_mgr.file_map[old_path]
                             del state_mgr.file_map[old_path]
                             
-                            # Si es un directorio, actualizar rutas hijas
                             if is_directory:
                                 old_prefix = old_path.rstrip('/') + '/'
                                 new_prefix = new_path.rstrip('/') + '/'
@@ -218,7 +286,6 @@ def handle_fs_order(message):
                                         state_mgr.file_map[new_key] = state_mgr.file_map[old_key]
                                         del state_mgr.file_map[old_key]
                     
-                    # Registrar en log local
                     state_mgr.append_operation('RN', new_path, {
                         'old_path': old_path,
                         'operation_id': operation_id,
@@ -272,7 +339,7 @@ def handle_fs_order(message):
                     
             except Exception as e:
                 print(f"[ORDER] Error eliminando archivo {path}: {e}")
-                return {'status': 'error', 'message': str(e)}    
+                return {'status': 'error', 'message': str(e)}   
 
         elif command == 'REPLICATE_FILE':
             source_ip = message.get('source')
@@ -286,12 +353,10 @@ def handle_fs_order(message):
             
             print(f"[SIDECAR] Orden REPLICATE_FILE recibida para {path} desde {source_ip}")
             
-            # 1. Asegurar directorios
             dir_path = os.path.dirname(path)
             if dir_path:
                 os.makedirs(dir_path, exist_ok=True)
             
-            # 2. Transferir archivo
             from ftp.node_transfer import get_node_transfer
             transfer = get_node_transfer()
             
@@ -300,7 +365,6 @@ def handle_fs_order(message):
                 success, actual_path, msg = transfer.request_file_from_node(source_ip, path, path)
                 
                 if success:
-                    # 3. Registrar operación STOR en el log local
                     metadata = {
                         'size': file_size,
                         'hash': file_hash,
@@ -313,7 +377,6 @@ def handle_fs_order(message):
                     
                     state_mgr.append_operation('STOR', path, metadata)
                     
-                    # 4. Actualizar file_map local
                     if path not in state_mgr.file_map:
                         state_mgr.file_map[path] = {
                             'type': 'file',
@@ -328,7 +391,6 @@ def handle_fs_order(message):
                     
                     print(f"[SIDECAR] Réplica exitosa: {path}")
                     
-                    # 5. Notificar al líder si es reparación
                     if is_repair and not from_leader and _bully_instance and not _bully_instance.am_i_leader():
                         leader_ip = _bully_instance.get_leader()
                         if leader_ip:
@@ -353,7 +415,7 @@ def handle_fs_order(message):
             
             print(f"[SIDECAR] Fallo en réplica de {path} después de {max_retries} intentos")
             return {'status': 'error', 'message': f'Replication failed after {max_retries} attempts'}
-        
+
         else:
             print(f"[ORDER] Comando desconocido: {command}")
             return {'status': 'error', 'message': f'Unknown command: {command}'}
@@ -365,9 +427,7 @@ def handle_fs_order(message):
         return {'status': 'error', 'message': str(e)}
 
 def handle_fs_request(message):
-    """
-    Este nodo (actuando como LÍDER) recibe una petición de un cliente (via otro nodo).
-    """
+    """Este nodo (actuando como LÍDER) recibe una petición de un cliente (via otro nodo)."""
     msg_type = message.get('subtype')
     data = message.get('data', {})
     return process_local_leader_request(msg_type, data)
@@ -398,152 +458,168 @@ def handle_request_logs(message):
     return {
         'status': 'ok', 
         'log': sm.get_full_log_as_dict(),
-        'node_ip': _cluster_comm_global.local_ip
+        'node_ip': _cluster_comm_global.local_ip,
+        'partition_epoch': sm.partition_epoch
     }
 
 def handle_sync_commands(message):
     """
     Ejecuta comandos de sincronización enviados por el líder.
-    SOLO para crear/actualizar archivos faltantes - NO para eliminar zombies.
     """
+    state_mgr = get_state_manager()
     commands = message.get('commands', [])
-    print(f"[SIDECAR] Recibidos {len(commands)} comandos de sincronización")
+    phase = message.get('phase', 'unknown')
+    print(f"[SIDECAR] Recibidos {len(commands)} comandos de sincronización (fase: {phase})")
     
     results = []
     
     for cmd in commands:
-        command = cmd.get('command')
+        command = cmd.get('command') or cmd.get('action')
         path = cmd.get('path')
         reason = cmd.get('reason', '')
         
         try:
-            if command == 'CREATE_FILE' or command == 'UPDATE_FILE':
-                # CREACIÓN/ACTUALIZACIÓN DE ARCHIVO CON LAST WRITE WINS
+            if command == 'DELETE_ZOMBIE':
+                safe_to_delete = cmd.get('safe_to_delete', False)
+                
+                print(f"[SYNC] DELETE_ZOMBIE {path} - Razón: {reason} (safe={safe_to_delete})")
+                
+                if os.path.exists(path):
+                    if os.path.isfile(path):
+                        if safe_to_delete:
+                            try:
+                                os.remove(path)
+                                print(f"[SYNC] Archivo zombie eliminado: {path}")
+                                
+                                state_mgr = get_state_manager()
+                                state_mgr.append_operation('DELE', path, {
+                                    'from_sync': True,
+                                    'reason': 'zombie_cleanup',
+                                    'original_reason': reason
+                                })
+                                
+                                results.append({
+                                    'command': command,
+                                    'path': path,
+                                    'status': 'deleted'
+                                })
+                            except Exception as e:
+                                print(f"[SYNC] Error eliminando zombie {path}: {e}")
+                                results.append({
+                                    'command': command,
+                                    'path': path,
+                                    'status': 'error',
+                                    'error': str(e)
+                                })
+                        else:
+                            print(f"[SYNC] ⚠ Zombie {path} NO es seguro de borrar, omitiendo")
+                            results.append({
+                                'command': command,
+                                'path': path,
+                                'status': 'skipped',
+                                'reason': 'not_safe_to_delete'
+                            })
+                    elif os.path.isdir(path):
+                        if not os.listdir(path):
+                            try:
+                                os.rmdir(path)
+                                print(f"[SYNC] Directorio zombie eliminado: {path}")
+                                
+                                state_mgr = get_state_manager()
+                                state_mgr.append_operation('RMD', path, {
+                                    'from_sync': True,
+                                    'reason': 'zombie_cleanup'
+                                })
+                                
+                                results.append({
+                                    'command': command,
+                                    'path': path,
+                                    'status': 'deleted'
+                                })
+                            except Exception as e:
+                                print(f"[SYNC] Error eliminando directorio zombie {path}: {e}")
+                                results.append({
+                                    'command': command,
+                                    'path': path,
+                                    'status': 'error',
+                                    'error': str(e)
+                                })
+                        else:
+                            print(f"[SYNC] ⚠ Directorio zombie {path} no está vacío, omitiendo")
+                            results.append({
+                                'command': command,
+                                'path': path,
+                                'status': 'skipped',
+                                'reason': 'directory_not_empty'
+                            })
+                else:
+                    print(f"[SYNC] ℹ Archivo zombie {path} ya no existe")
+                    results.append({
+                        'command': command,
+                        'path': path,
+                        'status': 'already_gone'
+                    })
+            
+            elif command == 'CREATE_FILE' or command == 'UPDATE_FILE':
                 replicas = cmd.get('replicas', [])
                 expected_size = cmd.get('size', 0)
                 expected_hash = cmd.get('hash', '')
-                global_mtime = cmd.get('global_mtime', 0)
                 
-                # Excluir al nodo local de la lista de réplicas
                 replicas = [ip for ip in replicas if ip != _cluster_comm_global.local_ip]
                 
                 if not replicas:
-                    print(f"[SYNC] {command} {path} - No hay réplicas disponibles")
-                    results.append({
-                        'command': command, 
-                        'path': path, 
-                        'status': 'error', 
-                        'error': 'No replicas available'
-                    })
+                    results.append({'command': command, 'status': 'error', 'error': 'No replicas'})
                     continue
                 
-                # Verificar si ya existe y comparar timestamps
                 if os.path.exists(path):
-                    existing_mtime = os.path.getmtime(path)
-                    existing_size = os.path.getsize(path)
+                    from ftp.paths import calculate_file_hash
+                    existing_hash = calculate_file_hash(path)
                     
-                    print(f"[SYNC] {command} {path} - Archivo existe (mtime local: {existing_mtime}, global: {global_mtime})")
-                    
-                    # Last Write Wins: Solo reemplazar si el global es MÁS RECIENTE
-                    if command == 'UPDATE_FILE' and global_mtime > 0 and existing_mtime >= global_mtime:
-                        print(f"[SYNC] {command} {path} - Versión local es igual o más reciente. CONSERVANDO local.")
+                    if existing_hash == expected_hash:
+                        print(f"[SYNC] {command} {path} - Ya existe con hash correcto")
                         results.append({
                             'command': command,
                             'path': path,
-                            'status': 'kept_local',
-                            'reason': 'local_version_newer_or_equal',
-                            'local_mtime': existing_mtime,
-                            'global_mtime': global_mtime
+                            'status': 'already_correct'
                         })
                         continue
-                    
-                    # Si es CREATE_FILE y el archivo existe, conservarlo
-                    if command == 'CREATE_FILE':
-                        print(f"[SYNC] {command} {path} - Archivo ya existe. CONSERVANDO.")
-                        results.append({
-                            'command': command,
-                            'path': path,
-                            'status': 'already_exists',
-                            'size': existing_size
-                        })
-                        continue
-                    
-                    # Si llegamos aquí, el global es más reciente - proceder con actualización
-                    print(f"[SYNC] {command} {path} - Versión global más reciente. Actualizando...")
                 
-                print(f"[SYNC] {command} {path} - Descargando de réplica (Razón: {reason})")
+                print(f"[SYNC] {command} {path} - Descargando (hash={expected_hash[:8] if expected_hash else 'N/A'}...)")
                 
                 success = False
-                last_error = ""
-                
                 for replica_ip in replicas:
                     try:
                         from ftp.node_transfer import get_node_transfer
                         transfer = get_node_transfer()
                         
-                        # Descargar a temporal primero
                         temp_path = f"{path}.tmp.{int(time.time())}"
                         success, actual_path, msg = transfer.request_file_from_node(replica_ip, path, temp_path)
                         
                         if success:
-                            # Verificar tamaño
-                            if expected_size > 0:
-                                actual_size = os.path.getsize(temp_path)
-                                if actual_size != expected_size:
-                                    print(f"[SYNC] {command} {path} - Tamaño incorrecto: esperado={expected_size}, actual={actual_size}")
-                                    os.remove(temp_path)
-                                    success = False
-                                    last_error = f"Size mismatch: {actual_size} vs {expected_size}"
-                                    continue
+                            from ftp.paths import calculate_file_hash
+                            downloaded_hash = calculate_file_hash(temp_path)
                             
-                            # Mover temporal a ubicación final
+                            if expected_hash and downloaded_hash != expected_hash:
+                                print(f"[SYNC] Hash incorrecto del archivo descargado")
+                                os.remove(temp_path)
+                                success = False
+                                continue
+                            
                             if os.path.exists(path):
                                 os.remove(path)
                             os.rename(temp_path, path)
-                            
-                            print(f"[SYNC] {command} {path} - Descargado exitosamente desde {replica_ip}")
+                            print(f"[SYNC] Descargado con hash correcto")
                             break
-                        else:
-                            print(f"[SYNC] {command} {path} - Falló descarga desde {replica_ip}: {msg}")
-                            last_error = msg
+                            
                     except Exception as e:
-                        print(f"[SYNC] {command} {path} - Error con réplica {replica_ip}: {e}")
-                        last_error = str(e)
+                        print(f"[SYNC] Error con réplica {replica_ip}: {e}")
                 
                 if success:
-                    # Registrar en el log local
-                    state_mgr = get_state_manager()
-                    metadata = {
-                        'size': expected_size,
-                        'hash': expected_hash,
-                        'from_sync': True,
-                        'reason': reason,
-                        'source_replica': replica_ip if success else None,
-                        'command_type': command
-                    }
-                    
-                    if command == 'UPDATE_FILE':
-                        metadata['global_mtime'] = global_mtime
-                    
-                    state_mgr.append_operation('STOR', path, metadata)
-                    
-                    results.append({
-                        'command': command, 
-                        'path': path, 
-                        'status': 'created' if command == 'CREATE_FILE' else 'updated',
-                        'source': replica_ip if success else None
-                    })
+                    results.append({'command': command, 'path': path, 'status': 'created'})
                 else:
-                    print(f"[SYNC] {command} {path} - No se pudo descargar de ninguna réplica")
-                    results.append({
-                        'command': command, 
-                        'path': path, 
-                        'status': 'error', 
-                        'error': f'Failed to download from any replica: {last_error}'
-                    })
+                    results.append({'command': command, 'path': path, 'status': 'error'})
                 
             elif command == 'CREATE_DIR':
-                # Creación de directorio
                 os.makedirs(path, exist_ok=True)
                 print(f"[SYNC] CREATE_DIR {path} - creado/verificado (Razón: {reason})")
                 
@@ -558,32 +634,151 @@ def handle_sync_commands(message):
                     'path': path, 
                     'status': 'created'
                 })
+
+            elif command == 'rename_local_to_version' or command == 'RENAME_LOCAL_TO_VERSION':
+                old_path = cmd.get('old_path')
+                new_path = cmd.get('new_path')
+                expected_hash = cmd.get('expected_hash', '')
+                expected_size = cmd.get('expected_size', 0)
+                version = cmd.get('version', 0)
                 
+                print(f"[SYNC] RENAME_LOCAL_TO_VERSION: {old_path} -> {new_path}")
+                print(f"[SYNC]   Esperado: hash={expected_hash[:8] if expected_hash else 'N/A'}..., size={expected_size}")
+                
+                try:
+                    if os.path.exists(old_path) and os.path.isfile(old_path):
+                        from ftp.paths import calculate_file_hash
+                        actual_hash = calculate_file_hash(old_path)
+                        actual_size = os.path.getsize(old_path)
+                        
+                        print(f"[SYNC]   Real: hash={actual_hash[:8] if actual_hash else 'N/A'}..., size={actual_size}")
+                        
+                        if expected_hash and actual_hash == expected_hash:
+                            os.makedirs(os.path.dirname(new_path), exist_ok=True)
+                            os.rename(old_path, new_path)
+                            print(f"[SYNC] Renombrado exitoso (hash coincide)")
+                            
+                            state_mgr = get_state_manager()
+                            state_mgr.append_operation('RN', new_path, {
+                                'old_path': old_path,
+                                'from_sync': True,
+                                'from_conflict': True,
+                                'version': version,
+                                'conflict_type': 'file_content_mismatch'
+                            })
+                            
+                            results.append({
+                                'command': command,
+                                'old_path': old_path,
+                                'new_path': new_path,
+                                'status': 'renamed',
+                                'hash': actual_hash
+                            })
+                        else:
+                            print(f"[SYNC] Hash no coincide")
+                            print(f"[SYNC]   Esperado: {expected_hash[:16] if expected_hash else 'N/A'}...")
+                            print(f"[SYNC]   Obtenido: {actual_hash[:16] if actual_hash else 'N/A'}...")
+                            results.append({
+                                'command': command,
+                                'status': 'hash_mismatch',
+                                'expected_hash': expected_hash[:16] if expected_hash else '',
+                                'actual_hash': actual_hash[:16] if actual_hash else ''
+                            })
+                    else:
+                        print(f"[SYNC] ⚠ Archivo origen no existe: {old_path}")
+                        if os.path.exists(new_path):
+                            print(f"[SYNC] ℹ Archivo versionado ya existe: {new_path}")
+                            results.append({'command': command, 'status': 'already_exists'})
+                        else:
+                            results.append({'command': command, 'status': 'source_missing'})
+                            
+                except Exception as e:
+                    print(f"[SYNC] Error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    results.append({'command': command, 'status': 'error', 'error': str(e)})
+
+            elif command == 'delete_original' or command == 'DELETE_ORIGINAL':
+                # Comando para eliminar archivo original tras crear versiones
+                path = cmd.get('path')
+                reason = cmd.get('reason', 'unknown')
+                
+                print(f"[SYNC] DELETE_ORIGINAL: {path} (razón: {reason})")
+                
+                try:
+                    if os.path.exists(path) and os.path.isfile(path):
+                        os.remove(path)
+                        print(f"[SYNC] Archivo original eliminado: {path}")
+                        
+                        state_mgr = get_state_manager()
+                        state_mgr.append_operation('DELE', path, {
+                            'from_sync': True,
+                            'reason': reason,
+                            'after_conflict_resolution': True
+                        })
+                        
+                        results.append({'command': command, 'path': path, 'status': 'deleted'})
+                    else:
+                        print(f"[SYNC] ℹ Archivo original ya no existe: {path}")
+                        results.append({'command': command, 'path': path, 'status': 'already_gone'})
+                except Exception as e:
+                    print(f"[SYNC] Error: {e}")
+                    results.append({'command': command, 'status': 'error', 'error': str(e)})
+
+            elif command == 'replicate_version' or command == 'REPLICATION':
+                path = cmd.get('path')
+                source = cmd.get('source_node')
+                expected_hash = cmd.get('expected_hash', '')
+                
+                print(f"[SYNC] REPLICATION: Trayendo {path} desde {source}")
+                
+                from ftp.node_transfer import get_node_transfer
+                transfer = get_node_transfer()
+                
+                temp_path = f"{path}.tmp.{int(time.time())}"
+                success, _, msg = transfer.request_file_from_node(source, path, temp_path)
+                
+                if success:
+                    # Verificar hash
+                    from ftp.paths import calculate_file_hash
+                    downloaded_hash = calculate_file_hash(temp_path)
+                    
+                    if expected_hash and downloaded_hash != expected_hash:
+                        print(f"[SYNC] Hash no coincide tras replicación")
+                        os.remove(temp_path)
+                        results.append({'command': command, 'status': 'hash_mismatch'})
+                    else:
+                        if os.path.exists(path):
+                            os.remove(path)
+                        os.rename(temp_path, path)
+                        print(f"[SYNC] Versión replicada con éxito")
+                        
+                        state_mgr.append_operation('STOR', path, {
+                            'from_sync': True,
+                            'source': source,
+                            'reason': 'conflict_resolution_replication',
+                            'hash': downloaded_hash
+                        })
+                        
+                        results.append({'command': command, 'path': path, 'status': 'replicated'})
+                else:
+                    print(f"[SYNC] Error en replicación: {msg}")
+                    results.append({'command': command, 'status': 'error', 'error': msg})
+
             else:
                 print(f"[SYNC] Comando no soportado: {command}")
-                results.append({
-                    'command': command, 
-                    'path': path, 
-                    'status': 'unsupported'
-                })
+                results.append({'command': command, 'status': 'not_implemented'})
                 
         except Exception as e:
-            print(f"[SYNC] Error ejecutando {command} {path}: {e}")
+            print(f"[SYNC] Error ejecutando {command}: {e}")
             import traceback
             traceback.print_exc()
-            results.append({
-                'command': command, 
-                'path': path, 
-                'status': 'error', 
-                'error': str(e)
-            })
+            results.append({'command': command, 'status': 'error', 'error': str(e)})
     
-    # Resumen de operaciones
     stats = {
         'total': len(results),
-        'success': sum(1 for r in results if r['status'] in ['created', 'updated', 'already_exists', 'kept_local']),
-        'errors': sum(1 for r in results if r['status'] == 'error'),
-        'unsupported': sum(1 for r in results if r['status'] == 'unsupported')
+        'success': sum(1 for r in results if r['status'] in ['created', 'renamed', 'already_correct', 'deleted', 'replicated']),
+        'errors': sum(1 for r in results if r['status'] == 'error')
     }
     
     print(f"[SYNC] Resumen: {stats}")
@@ -656,33 +851,194 @@ def handle_replica_success(message):
 # --- HILOS SECUNDARIOS ---
 
 def update_ips_callback(new_ips):
-        global _cluster_comm_global, _bully_instance
+    global _cluster_comm_global, _bully_instance, _last_known_cluster_size, _nodes_being_integrated
+    
+    old_ips = set(_cluster_comm_global.cluster_ips)
+    new_ips_set = set(new_ips)
+    
+    added_ips = new_ips_set - old_ips
+    removed_ips = old_ips - new_ips_set
+    
+    # 1. Detección de partición
+    partition_detected = False
+    if len(new_ips) <= _last_known_cluster_size * 0.67:
+        print(f"[SIDECAR] PARTICIÓN DETECTADA (pérdida de nodos): {len(new_ips)} nodos (antes: {_last_known_cluster_size})")
+        partition_detected = True
+    elif _last_known_cluster_size <= 4 and len(removed_ips) >= 2:
+        print(f"[SIDECAR] PARTICIÓN DETECTADA (cluster pequeño): perdidos {len(removed_ips)} de {_last_known_cluster_size} nodos")
+        partition_detected = True
+    
+    if partition_detected:
+        state_mgr = get_state_manager()
+        state_mgr.increment_partition_epoch()
+    
+    _last_known_cluster_size = len(new_ips)
+    _cluster_comm_global.update_cluster_ips(new_ips)
+    _bully_instance.update_nodes(new_ips)
+    
+    # 2. Gestión de cambios si soy el líder
+    if _bully_instance and _bully_instance.am_i_leader():
+        # Procesar salidas inmediatamente
+        for failed_ip in removed_ips:
+            print(f"[SIDECAR] Nodo {failed_ip} ha salido, gestionando fallo...")
+            handle_node_failure(failed_ip)
         
-        old_ips = set(_cluster_comm_global.cluster_ips)
-        new_ips_set = set(new_ips)
+        # Procesar entradas con bloqueo para evitar duplicados
+        with _integration_lock:
+            actually_new = [ip for ip in added_ips if ip not in _nodes_being_integrated]
+            if actually_new:
+                for ip in actually_new:
+                    _nodes_being_integrated.add(ip)
+                
+                print(f"[SIDECAR] Iniciando reintegración para: {actually_new}")
+                threading.Thread(
+                    target=perform_bulk_reintegration, 
+                    args=(actually_new,), 
+                    daemon=True
+                ).start()
+
+def perform_bulk_reintegration(new_nodes):
+    state_mgr = get_state_manager()
+    cc = _cluster_comm_global
+    combined_data_for_merge = []
+
+    print(f"[SIDECAR-BULK] Iniciando reintegración de {len(new_nodes)} nodos")
+
+    # Incluir TODOS los nodos del cluster, no solo los nuevos
+    all_nodes = cc.cluster_ips.copy()
+    existing_nodes = [ip for ip in all_nodes if ip not in new_nodes and ip != cc.local_ip]
+    
+    print(f"[SIDECAR-BULK] Nodos nuevos: {new_nodes}")
+    print(f"[SIDECAR-BULK] Nodos existentes: {existing_nodes}")
+    print(f"[SIDECAR-BULK] Total a procesar: {len(all_nodes)} nodos")
+
+    # 1. Recolección CON disk_scan - TODOS los nodos (nuevos + existentes)
+    all_remote_nodes = new_nodes + existing_nodes
+    
+    for ip in all_remote_nodes:
+        print(f"[SIDECAR-BULK] Solicitando datos de {ip}...")
         
-        added_ips = new_ips_set - old_ips
-        removed_ips = old_ips - new_ips_set
+        resp_logs = cc.send_message(ip, {'type': 'REQUEST_LOGS'}, expect_response=True)
         
-        _cluster_comm_global.update_cluster_ips(new_ips)
-        _bully_instance.update_nodes(new_ips)
+        # Siempre solicitar disk_scan
+        from ftp.paths import SERVER_ROOT
+        resp_scan = cc.send_message(ip, {
+            'type': 'REQUEST_DISK_SCAN',
+            'root_path': os.path.join(SERVER_ROOT, 'root')
+        }, expect_response=True)
         
-        # Si soy líder, gestionar fallos de nodos
-        if _bully_instance and _bully_instance.am_i_leader():
-            # Para cada nodo que ha salido, manejar su falla
-            for failed_ip in removed_ips:
-                print(f"[SIDECAR] Nodo {failed_ip} ha salido del cluster, iniciando recuperación...")
-                handle_node_failure(failed_ip)
-            
-            # Para cada nodo que ha entrado, verificar si necesita réplicas
-            for new_ip in added_ips:
-                print(f"[SIDECAR] Nodo {new_ip} ha entrado, verificando réplicas necesarias...")
-                handle_node_join(new_ip)
+        node_log = resp_logs.get('log', []) if resp_logs and resp_logs.get('status') == 'ok' else []
+        node_scan = resp_scan.get('disk_scan', {}) if resp_scan and resp_scan.get('status') == 'ok' else {}
         
-        if added_ips:
-            print(f"[SIDECAR] Nodos añadidos: {added_ips}")
-        if removed_ips:
-            print(f"[SIDECAR] Nodos removidos: {removed_ips}")
+        print(f"[SIDECAR-BULK] {ip}: {len(node_log)} ops, {len(node_scan)} archivos en disco")
+        
+        combined_data_for_merge.append({
+            'node_ip': ip,
+            'log': node_log,
+            'scan': node_scan
+        })
+
+    # Añadir datos del líder CON disk_scan
+    from ftp.paths import SERVER_ROOT
+    leader_scan = state_mgr.scan_local_filesystem(os.path.join(SERVER_ROOT, 'root'))
+    
+    combined_data_for_merge.append({
+        'node_ip': cc.local_ip,
+        'log': state_mgr.get_full_log_as_dict(),
+        'scan': leader_scan
+    })
+    
+    print(f"[SIDECAR-BULK] Líder: {len(leader_scan)} archivos en disco")
+
+    # 2. Merge con detección de conflictos
+    print(f"[SIDECAR-BULK] Fusionando datos de {len(combined_data_for_merge)} nodos totales")
+    _, conflict_actions = state_mgr.merge_external_logs(combined_data_for_merge)
+
+    # 3. Ejecución de acciones por fases (prioridad)
+    if conflict_actions:
+        print(f"[SIDECAR-BULK] Ejecutando {len(conflict_actions)} acciones en 3 fases")
+        
+        # Mostrar distribución de acciones por nodo
+        actions_by_node = defaultdict(int)
+        for action in conflict_actions:
+            node = action.get('node') or action.get('target_node')
+            if node:
+                actions_by_node[node] += 1
+        print(f"[SIDECAR-BULK] Distribución de acciones por nodo: {dict(actions_by_node)}")
+        
+        # FASE 1: Renombrar (priority=1)
+        phase1_actions = [a for a in conflict_actions if a.get('priority') == 1]
+        if phase1_actions:
+            print(f"[SIDECAR-BULK] FASE 1: Renombrando {len(phase1_actions)} archivos...")
+            execute_sync_actions(phase1_actions, 'rename')
+            time.sleep(2)
+        
+        # FASE 2: Replicar (priority=2)
+        phase2_actions = [a for a in conflict_actions if a.get('priority') == 2]
+        if phase2_actions:
+            print(f"[SIDECAR-BULK] FASE 2: Replicando {len(phase2_actions)} versiones...")
+            execute_sync_actions(phase2_actions, 'replicate')
+            time.sleep(3)
+        
+        # FASE 3: Borrar originales (priority=3)
+        phase3_actions = [a for a in conflict_actions if a.get('priority') == 3]
+        if phase3_actions:
+            print(f"[SIDECAR-BULK] FASE 3: Borrando {len(phase3_actions)} archivos originales...")
+            execute_sync_actions(phase3_actions, 'delete_original')
+            time.sleep(1)
+
+    # 4. Finalización
+    ops = get_leader_operations()
+    if ops:
+        for ip in new_nodes:
+            ops.handle_node_join(ip)
+    
+    with _integration_lock:
+        all_nodes = cc.cluster_ips.copy()
+        existing_nodes = [ip for ip in all_nodes if ip not in new_nodes and ip != cc.local_ip]
+
+        print(f"[SIDECAR-BULK] Nodos nuevos: {new_nodes}")
+        print(f"[SIDECAR-BULK] Nodos existentes: {existing_nodes}")
+
+        all_remote_nodes = new_nodes + existing_nodes
+        for ip in all_remote_nodes:
+            _nodes_being_integrated.discard(ip)
+    
+    print(f"[SIDECAR-BULK] Reintegración completada")
+
+def execute_sync_actions(actions, phase_name):
+    """Ejecuta acciones de sincronización agrupadas por nodo"""
+    cc = _cluster_comm_global
+    local_ip = cc.local_ip
+    
+    # Agrupar por nodo
+    actions_by_node = defaultdict(list)
+    for action in actions:
+        target = action.get('node') or action.get('target_node')
+        if target:
+            actions_by_node[target].append(action)
+    
+    # Enviar a cada nodo
+    for node_ip, node_actions in actions_by_node.items():
+        print(f"[SIDECAR-BULK] Enviando {len(node_actions)} acciones ({phase_name}) a {node_ip}")
+        
+        if node_ip == local_ip:
+            # Ejecutar localmente
+            handle_sync_commands({
+                'type': 'SYNC_COMMANDS',
+                'commands': node_actions,
+                'phase': phase_name
+            })
+        else:
+            # Enviar a nodo remoto
+            try:
+                cc.send_message(node_ip, {
+                    'type': 'SYNC_COMMANDS',
+                    'commands': node_actions,
+                    'phase': phase_name
+                }, expect_response=False)
+            except Exception as e:
+                print(f"[SIDECAR-BULK] Error enviando a {node_ip}: {e}")
 
 def start_replication_checker():
         """Verifica periódicamente el estado de replicación."""
@@ -714,6 +1070,10 @@ def handle_node_failure(failed_ip: str):
         print(f"[SIDECAR] No soy líder, no manejo fallas de nodos")
 
 def _handle_file_rename(old_path, new_path, operation_id, message):
+    """
+    Maneja el renombre de archivo.
+    IMPORTANTE: Registra como DELE + STOR para mantener independencia de archivos
+    """
     if os.path.exists(old_path):
         if os.path.exists(new_path):
             print(f"[ORDER] ERROR: El archivo destino ya existe: {new_path}")
@@ -722,9 +1082,39 @@ def _handle_file_rename(old_path, new_path, operation_id, message):
         os.makedirs(os.path.dirname(new_path), exist_ok=True)
         
         try:
+            # Calcular hash antes de mover (para el STOR)
+            from ftp.paths import calculate_file_hash
+            file_hash = calculate_file_hash(old_path)
+            file_size = os.path.getsize(old_path)
+            
+            # Realizar el rename físico
             os.rename(old_path, new_path)
             print(f"[ORDER] Archivo renombrado: {old_path} -> {new_path}")
+            
+            # Registrar como DELE del original + STOR del nuevo
+            state_mgr = get_state_manager()
+            
+            # 1. Registrar eliminación del archivo original
+            state_mgr.append_operation('DELE', old_path, {
+                'operation_id': operation_id,
+                'executed_by': _cluster_comm_global.local_ip,
+                'from_rename': True,
+                'renamed_to': new_path
+            })
+            
+            # 2. Registrar creación del archivo nuevo
+            state_mgr.append_operation('STOR', new_path, {
+                'size': file_size,
+                'hash': file_hash,
+                'operation_id': operation_id,
+                'executed_by': _cluster_comm_global.local_ip,
+                'from_rename': True,
+                'renamed_from': old_path,
+                'replicas': [_cluster_comm_global.local_ip]
+            })
+            
             return True
+            
         except OSError as e:
             if e.errno == 26 or "Text file busy" in str(e):
                 print(f"[ORDER] ERROR: El archivo {old_path} está siendo usado (ETXTBSY).")
@@ -753,8 +1143,30 @@ def _handle_file_rename(old_path, new_path, operation_id, message):
                     
                     if success:
                         try:
+                            # Calcular hash antes de mover
+                            from ftp.paths import calculate_file_hash
+                            file_hash = calculate_file_hash(old_path)
+                            file_size = os.path.getsize(old_path)
+                            
                             os.rename(old_path, new_path)
                             print(f"[ORDER] Archivo renombrado: {old_path} -> {new_path}")
+                            
+                            # Registrar como DELE + STOR
+                            state_mgr.append_operation('DELE', old_path, {
+                                'operation_id': operation_id,
+                                'executed_by': _cluster_comm_global.local_ip,
+                                'from_rename': True
+                            })
+                            
+                            state_mgr.append_operation('STOR', new_path, {
+                                'size': file_size,
+                                'hash': file_hash,
+                                'operation_id': operation_id,
+                                'executed_by': _cluster_comm_global.local_ip,
+                                'from_rename': True,
+                                'replicas': [_cluster_comm_global.local_ip]
+                            })
+                            
                             return True
                         except OSError as e:
                             if e.errno == 26 or "Text file busy" in str(e):
@@ -838,13 +1250,13 @@ def create_and_log_dirs(final_path, state_mgr, local_ip, operation_id):
 def handle_node_join(new_ip):
     """
     Maneja la entrada de un nodo nuevo o reintegrado.
-    SOLO sincroniza archivos faltantes - NO elimina nada.
+    Sincroniza archivos faltantes Y limpia zombies.
     """
     bully = get_global_bully()
     if not bully or not bully.am_i_leader():
         return
 
-    print(f"[SIDECAR] Nodo {new_ip} unido. Iniciando sincronización...")
+    print(f"[SIDECAR] Nodo {new_ip} unido. Iniciando sincronización completa...")
     cc = get_global_cluster_comm()
     
     # 1. Solicitar logs del nodo
@@ -856,7 +1268,7 @@ def handle_node_join(new_ip):
     
     node_logs = resp_logs.get('log', [])
     
-    # 2. Solicitar escaneo del disco físico
+    # 2. Solicitar escaneo del disco fí­sico
     print(f"[SIDECAR] Solicitando escaneo de disco a {new_ip}...")
     resp_scan = cc.send_message(new_ip, {
         'type': 'REQUEST_DISK_SCAN',
@@ -870,28 +1282,60 @@ def handle_node_join(new_ip):
     else:
         print(f"[SIDECAR] No se pudo escanear disco, usando solo logs")
     
-    # 3. Analizar inconsistencias (solo faltantes y desactualizados)
+    # 3. Analizar inconsistencias (faltantes, desactualizados Y zombies)
     sm = get_state_manager()
     analysis = sm.analyze_node_state(node_logs, new_ip, disk_scan)
     
     print(f"[SIDECAR] Análisis de nodo {new_ip}:")
     print(f"  - Total inconsistencias: {len(analysis['inconsistencies'])}")
-    print(f"  - Usado escaneo de disco: {analysis.get('node_state_summary', {}).get('used_disk_scan', False)}")
+    print(f"  - Zombies: {analysis.get('node_state_summary', {}).get('zombie_count', 0)}")
+    print(f"  - Faltantes: {analysis.get('node_state_summary', {}).get('missing_count', 0)}")
+    print(f"  - Desactualizados: {analysis.get('node_state_summary', {}).get('outdated_count', 0)}")
     
-    # 4. SINCRONIZACIÓN (solo replicación de faltantes)
+    # 4. SINCRONIZACIÓN (replicación + limpieza)
     if analysis['has_inconsistencies']:
-        replications = [cmd for cmd in analysis['inconsistencies'] 
-                       if cmd.get('priority', 99) >= 2]
-        
+
+        # separar pero NO limpiar primero
+        replications = [
+            cmd for cmd in analysis['inconsistencies']
+            if cmd.get('command') in ['CREATE_FILE', 'UPDATE_FILE', 'CREATE_DIR']
+        ]
+
+        zombies = [
+            cmd for cmd in analysis['inconsistencies']
+            if cmd.get('command') == 'DELETE_ZOMBIE'
+        ]
+
+        # Fase 1: REPLICAR PRIMERO
         if replications:
-            print(f"[SIDECAR] Replicando {len(replications)} archivos faltantes...")
-            
+            print(f"[SIDECAR] Fase 1: Replicando {len(replications)} archivos faltantes...")
             cc.send_message(new_ip, {
                 'type': 'SYNC_COMMANDS',
                 'commands': replications,
-                'phase': 'replication',
-                'analysis_summary': analysis.get('node_state_summary', {})
+                'phase': 'replication'
             }, expect_response=False)
+
+            # Esperar a que se escriba el estado
+            time.sleep(2)
+
+        # Filtrar zombies seguros
+        safe_zombies = [
+            z for z in zombies
+            if z.get('safe_to_delete', False)
+        ]
+
+        # Fase 2: limpieza SOLO si es seguro
+        if safe_zombies:
+            print(f"[SIDECAR] Fase 2: Limpiando {len(safe_zombies)} archivos zombie seguros...")
+            cc.send_message(new_ip, {
+                'type': 'SYNC_COMMANDS',
+                'commands': safe_zombies,
+                'phase': 'zombie_cleanup'
+            }, expect_response=False)
+        else:
+            if zombies:
+                print(f"[SIDECAR] Zombies detectados pero diferidos (no seguros de borrar)")
+
     else:
         print(f"[SIDECAR] Nodo {new_ip} está completamente sincronizado.")
     

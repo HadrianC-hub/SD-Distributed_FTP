@@ -6,7 +6,7 @@ import getpass
 
 USERS_FILE = os.path.join(os.path.dirname(__file__), "../users/users.json")
 
-# ----------- Funciones auxiliares (idénticas al servidor) -----------
+# ----------- Funciones auxiliares -----------
 
 def hash_password(password: str) -> str:
     """Genera un hash PBKDF2 seguro (compatible con server.py)."""
@@ -17,7 +17,7 @@ def hash_password(password: str) -> str:
 def verify_password(stored_hash: str, password: str) -> bool:
     """Verifica contraseña (solo para validación opcional)."""
     try:
-        algo, iter_str, salt_hex, hash_hex = stored_hash.split("$")
+        _, iter_str, salt_hex, hash_hex = stored_hash.split("$")
         salt = bytes.fromhex(salt_hex)
         new_hash = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, int(iter_str))
         return hmac.compare_digest(new_hash.hex(), hash_hex)
@@ -46,7 +46,7 @@ def main():
 
     users = load_users()
     if username in users:
-        print(f"⚠️ El usuario '{username}' ya existe.")
+        print(f"El usuario '{username}' ya existe.")
         choice = input("¿Deseas sobrescribirlo? (s/n): ").lower()
         if choice != "s":
             print("Operación cancelada.")

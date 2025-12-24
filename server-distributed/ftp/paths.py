@@ -1,9 +1,10 @@
 import os
 import random
 import string
+import hashlib
 
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))   # carpeta donde está server.py
-SERVER_ROOT = os.path.join(BASE_DIR, "data")                                # raíz real del servidor
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+SERVER_ROOT = os.path.join(BASE_DIR, "data")
 
 def generate_unique_filename(directory, original_filename):
     name, ext = os.path.splitext(original_filename)
@@ -85,7 +86,6 @@ def calculate_file_hash(filepath):
     Calcula hash MD5 de un archivo.
     Función centralizada para evitar duplicación.
     """
-    import hashlib
     hash_md5 = hashlib.md5()
     try:
         with open(filepath, "rb") as f:
@@ -93,5 +93,12 @@ def calculate_file_hash(filepath):
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
     except Exception as e:
-        print(f"[HASH] Error calculando hash de {filepath}: {e}")
+        print(f"[ERROR][HASH] Error calculando hash de {filepath}: {e}")
         return ""
+
+def ip_to_int(ip: str) -> int:
+    """Convierte una dirección IP a un entero para comparación numérica."""
+    parts = ip.split('.')
+    if len(parts) != 4:
+        return 0
+    return (int(parts[0]) << 24) + (int(parts[1]) << 16) + (int(parts[2]) << 8) + int(parts[3])

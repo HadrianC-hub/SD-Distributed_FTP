@@ -87,16 +87,29 @@ class LeaderOperations:
                     'message': f'File is currently locked by another operation. Please try again later.'
                 }
         
-        replica_nodes = file_info.get('replicas', [])
+        # Obtener TODAS las réplicas conocidas, no solo las del file_map
+        all_replicas = self.state_mgr.get_all_replicas_for_path(path)
+        
+        print(f"[LEADER] DELE: Réplicas en file_map: {file_info.get('replicas', [])}")
+        print(f"[LEADER] DELE: Todas las réplicas conocidas: {all_replicas}")
+        
+        # Usar todas las réplicas conocidas para el borrado
+        replica_nodes = list(all_replicas) if all_replicas else file_info.get('replicas', [])
+        
         operation_id = f"dele_{int(time.time())}"
         
         if path in self.state_mgr.file_map:
             del self.state_mgr.file_map[path]
             
-        self.state_mgr.append_operation('DELE', path, {'requester': requester_ip})
+        self.state_mgr.append_operation('DELE', path, {
+            'requester': requester_ip,
+            'all_replicas_targeted': replica_nodes
+        })
+        
+        # Enviar orden de borrado a TODOS los nodos que tienen el archivo
         self._send_operation_to_nodes('DELETE_FILE', path, replica_nodes, operation_id)
         
-        print(f"[LEADER] DELE approved for {path}")
+        print(f"[LEADER] DELE approved for {path}, targeting {len(replica_nodes)} replicas")
         return {'status': 'ok', 'command': 'DELETE_FILE', 'path': path}
 
     def handle_retr_request(self, requester_ip: str, path: str, session_user: str = None) -> Dict:
@@ -181,10 +194,10 @@ class LeaderOperations:
             return {'status': 'error', 'message': 'Target already exists'}
         
         item_type = file_info.get('type', 'file')
+        replica_nodes = file_info.get('replicas', []) if item_type == 'file' else self.cluster_comm.cluster_ips.copy()
         
         if item_type == 'dir':
-            replica_nodes = self.cluster_comm.cluster_ips.copy()
-            
+            # Para directorios, buscar archivos dentro
             old_prefix = old_path.rstrip('/') + '/'
             files_in_dir = []
             with self.state_mgr.lock:
@@ -192,13 +205,13 @@ class LeaderOperations:
                     if path.startswith(old_prefix):
                         files_in_dir.append((path, info))
         else:
-            replica_nodes = file_info.get('replicas', [])
             files_in_dir = []
         
         operation_id = f"rn_{int(time.time())}_{random.randint(1000, 9999)}"
         
         with self.state_mgr.lock:
             if item_type == 'dir':
+                # Para directorios: actualizar file_map
                 self.state_mgr.file_map[new_path] = file_info.copy()
                 del self.state_mgr.file_map[old_path]
                 
@@ -217,21 +230,57 @@ class LeaderOperations:
                     
                     print(f"[LEADER] Actualizada ruta en estado global: {old_key} -> {new_key}")
             else:
-                self.state_mgr.file_map[new_path] = file_info
+                # Eliminar archivo original del file_map
                 del self.state_mgr.file_map[old_path]
+                
+                # Crear entrada para el nuevo archivo (como si fuera nuevo)
+                self.state_mgr.file_map[new_path] = {
+                    'type': 'file',
+                    'mtime': time.time(),
+                    'size': file_info.get('size', 0),
+                    'hash': file_info.get('hash', ''),
+                    'replicas': replica_nodes,
+                    'created_by': session_user,
+                    'renamed_from': old_path
+                }
         
-        metadata = {
-            'old_path': old_path,
-            'new_path': new_path,
-            'requester': requester_ip,
-            'replicas': replica_nodes,
-            'lock_id': lock_id,
-            'operation_id': operation_id,
-            'type': item_type,
-            'is_directory': item_type == 'dir',
-            'files_in_dir_count': len(files_in_dir) if item_type == 'dir' else 0
-        }
-        self.state_mgr.append_operation('RN', new_path, metadata)
+        # Registrar operaciones en el log
+        if item_type == 'file':
+            # Para archivos: registrar DELE + STOR
+            metadata_dele = {
+                'old_path': old_path,
+                'requester': requester_ip,
+                'lock_id': lock_id,
+                'operation_id': operation_id,
+                'from_rename': True,
+                'renamed_to': new_path
+            }
+            self.state_mgr.append_operation('DELE', old_path, metadata_dele)
+            
+            metadata_stor = {
+                'size': file_info.get('size', 0),
+                'hash': file_info.get('hash', ''),
+                'replicas': replica_nodes,
+                'requester': requester_ip,
+                'operation_id': operation_id,
+                'from_rename': True,
+                'renamed_from': old_path
+            }
+            self.state_mgr.append_operation('STOR', new_path, metadata_stor)
+        else:
+            # Para directorios: mantener RN
+            metadata = {
+                'old_path': old_path,
+                'new_path': new_path,
+                'requester': requester_ip,
+                'replicas': replica_nodes,
+                'lock_id': lock_id,
+                'operation_id': operation_id,
+                'type': item_type,
+                'is_directory': True,
+                'files_in_dir_count': len(files_in_dir)
+            }
+            self.state_mgr.append_operation('RN', new_path, metadata)
         
         self.release_file_lock(old_path, requester_ip)
         
@@ -249,10 +298,35 @@ class LeaderOperations:
         all_nodes = self.cluster_comm.cluster_ips
         replica_nodes = self.calculate_replica_nodes(path)
         
+        # Asegurar que el nodo solicitante sea siempre una réplica
         if requester_ip not in replica_nodes and requester_ip in all_nodes:
-            if len(replica_nodes) >= 3: replica_nodes[-1] = requester_ip
-            else: replica_nodes.append(requester_ip)
-            
+            if len(replica_nodes) < 3:
+                # Hay espacio para añadir al solicitante
+                replica_nodes.append(requester_ip)
+            else:
+                replaced = False
+                for i in range(len(replica_nodes)):
+                    # Evitar reemplazar si el solicitante ya es el líder o tiene datos importantes
+                    if replica_nodes[i] != requester_ip:
+                        replica_nodes[i] = requester_ip
+                        replaced = True
+                        break
+                
+                if not replaced and replica_nodes:
+                    # Si no pudimos reemplazar, reemplazamos la última
+                    replica_nodes[-1] = requester_ip
+        
+        # Asegurar que no haya duplicados y limitar a 3
+        replica_nodes = list(dict.fromkeys(replica_nodes))  # Eliminar duplicados manteniendo orden
+        if len(replica_nodes) > 3:
+            # Priorizar mantener al solicitante si está en la lista
+            if requester_ip in replica_nodes:
+                # Mantener al solicitante y las primeras 2 otras réplicas
+                replica_nodes = [requester_ip] + [r for r in replica_nodes if r != requester_ip][:2]
+            else:
+                # Mantener solo las primeras 3
+                replica_nodes = replica_nodes[:3]
+        
         operation_id = f"stor_{int(time.time())}_{random.randint(1000,9999)}"
         
         self.state_mgr.file_map[path] = {
@@ -264,7 +338,7 @@ class LeaderOperations:
         for node_ip in replica_nodes:
             if node_ip != requester_ip:
                 self._send_replicate_order(node_ip, path, requester_ip, size, hash, operation_id)
-                
+        
         return {'status': 'ok', 'command': 'STOR', 'path': path, 'replicas': replica_nodes, 'operation_id': operation_id}
 
     def handle_appe_request(self, requester_ip: str, path: str, delta_size: int, session_user: str = None) -> Dict:
@@ -281,15 +355,21 @@ class LeaderOperations:
         new_size = file_info.get('size', 0) + delta_size
         file_info['size'] = new_size
         file_info['mtime'] = time.time()
-        
         operation_id = f"appe_{int(time.time())}_{random.randint(1000, 9999)}"
+        current_epoch = self.state_mgr.partition_epoch
+        
         metadata = {
             'delta_size': delta_size,
             'requester': requester_ip,
             'replicas': file_info['replicas'],
-            'operation_id': operation_id
+            'operation_id': operation_id,
+            'new_size': new_size,
+            'append_timestamp': time.time(),
+            'partition_epoch': current_epoch
         }
         self.state_mgr.append_operation('APPE', path, metadata)
+        
+        print(f"[LEADER] APPE registrado con epoch={current_epoch}")
         
         return {
             'status': 'ok',
@@ -339,7 +419,7 @@ class LeaderOperations:
                     'created_by': 'system',
                     'replicas': self.cluster_comm.cluster_ips
                 }
-                print(f"[LEADER] Directorio raíz de usuario creado: {user_root}")
+                print(f"[LEADER] Directorio raí­z de usuario creado: {user_root}")
         
         dir_info = self.state_mgr.get_file_info(abs_path)
         if not dir_info or dir_info.get('type') != 'dir':
@@ -381,7 +461,9 @@ class LeaderOperations:
     # --- FUNCIONES AUXILIARES ---
 
     def calculate_replica_nodes(self, filename: str, size: int = 0) -> List[str]:
-        all_ips = sorted(self.cluster_comm.cluster_ips)
+        from ftp.bully_election import BullyElection
+        all_ips = sorted(self.cluster_comm.cluster_ips, key=BullyElection.ip_to_tuple)
+        
         if not all_ips: return []
         if len(all_ips) <= 3: return all_ips
         
@@ -590,7 +672,7 @@ class LeaderOperations:
 
     def _repair_file(self, path: str, current_replicas: List[str], available_nodes: List[str]):
         if not current_replicas:
-            print(f"[LEADER-REPAIR] CRÍTICO: Archivo {path} perdido completamente (0 réplicas vivas).")
+            print(f"[LEADER-REPAIR] Archivo {path} perdido completamente (0 réplicas vivas).")
             return
 
         source_node = current_replicas[0]
@@ -621,6 +703,7 @@ class LeaderOperations:
                 file_info.get('hash', ''), 
                 f"repair_{int(time.time())}"
             )
+
 
 # Singleton para LeaderOperations
 _leader_ops_global = None
